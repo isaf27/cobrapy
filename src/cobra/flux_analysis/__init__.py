@@ -7,6 +7,7 @@ from .deletion import (
     single_reaction_deletion,
 )
 from .fastcc import fastcc
+from .find_cyclic_reactions import find_cyclic_reactions
 from .gapfilling import gapfill
 from .geometric import geometric_fba
 from .loopless import loopless_solution, add_loopless

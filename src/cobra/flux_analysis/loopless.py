@@ -1,20 +1,26 @@
 """Provide functions to remove thermodynamically infeasible loops."""
 
-from typing import TYPE_CHECKING, Dict, Optional, Union
+from typing import TYPE_CHECKING, Dict, Optional, Union, List
 
 import numpy as np
 from optlang.symbolics import Zero
 
 from ..core import get_solution
-from ..util import create_stoichiometric_matrix, nullspace
+from ..util import create_stoichiometric_matrix, nullspace, nullspace_fast_snp
 from .helpers import normalize_cutoff
+from .find_cyclic_reactions import find_cyclic_reactions
 
 
 if TYPE_CHECKING:
     from cobra import Model, Reaction, Solution
 
 
-def add_loopless(model: "Model", zero_cutoff: Optional[float] = None) -> None:
+def add_loopless(
+    model: "Model",
+    zero_cutoff: Optional[float] = None,
+    method: str = "original",
+    reactions: Optional[List[str]] = None
+) -> None:
     """Modify a model so all feasible flux distributions are loopless.
 
     It adds variables and constraints to a model which will disallow flux
@@ -35,6 +41,10 @@ def add_loopless(model: "Model", zero_cutoff: Optional[float] = None) -> None:
         Cutoff used for null space. Coefficients with an absolute value
         smaller than `zero_cutoff` are considered to be zero. The default
         uses the `model.tolerance` (default None).
+    method : str, "original" or "fastSNP", optional
+        TODO: @isaf27
+    reactions : list of str, optional
+        TODO: @isaf27
 
     References
     ----------
@@ -44,18 +54,43 @@ def add_loopless(model: "Model", zero_cutoff: Optional[float] = None) -> None:
        in: Biophys J. 2011 Mar 2;100(5):1381.
 
     """
+    if method not in ["original", "fastSNP"]:
+        raise ValueError(f"unsupported method: {method}")
+
     zero_cutoff = normalize_cutoff(model, zero_cutoff)
 
-    internal = [i for i, r in enumerate(model.reactions) if not r.boundary]
-    s_int = create_stoichiometric_matrix(model)[:, np.array(internal)]
-    n_int = nullspace(s_int).T
+    if reactions is None and method == "fastSNP":
+        reactions, _ = find_cyclic_reactions(model, zero_cutoff=zero_cutoff)
+
+    reactions_to_constrain = [i for i, r in enumerate(model.reactions) if not r.boundary]
+    if reactions is not None:
+        reactions_set = set(reactions)
+        reactions_to_constrain = [
+            i for i, r in enumerate(model.reactions) if not r.boundary and r.id in reactions_set
+        ]
+
+    s_int = create_stoichiometric_matrix(model)[:, np.array(reactions_to_constrain)]
+
+    if method == "original":
+        n_int = nullspace(s_int).T
+    elif method == "fastSNP":
+        bounds_int = np.array([model.reactions[i].bounds for i in reactions_to_constrain])
+        directions_int = np.sign(bounds_int)
+        v_bound = np.max(np.abs(bounds_int))
+        n_int = nullspace_fast_snp(model.problem, s_int, directions_int, v_bound=v_bound, zero_cutoff=zero_cutoff).T
+    else:
+        raise ValueError(f"unsupported method: {method}")
+
     max_bound = max(max(abs(b) for b in r.bounds) for r in model.reactions)
     prob = model.problem
 
     # Add indicator variables and new constraints
     to_add = []
-    for i in internal:
-        rxn = model.reactions[i]
+    for i, ridx in enumerate(reactions_to_constrain):
+        if not (np.abs(n_int[:, i]) > zero_cutoff).any():
+            continue
+
+        rxn = model.reactions[ridx]
         # indicator variable a_i
         indicator = prob.Variable(f"indicator_{rxn.id}", type="binary")
         # -M*(1 - a_i) <= v_i <= M*a_i
@@ -84,7 +119,7 @@ def add_loopless(model: "Model", zero_cutoff: Optional[float] = None) -> None:
         model.add_cons_vars([nullspace_constraint])
         coefs = {
             model.variables[f"delta_g_{model.reactions[ridx].id}"]: row[i]
-            for i, ridx in enumerate(internal)
+            for i, ridx in enumerate(reactions_to_constrain)
             if abs(row[i]) > zero_cutoff
         }
         model.constraints[name].set_linear_coefficients(coefs)

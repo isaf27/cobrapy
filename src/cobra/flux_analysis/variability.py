@@ -88,10 +88,12 @@ def _fva_step(reaction_id: str) -> Tuple[str, float]:
     return reaction_id, value
 
 
+# TODO: @isaf27
 def flux_variability_analysis(
     model: "Model",
     reaction_list: Optional[List[Union["Reaction", str]]] = None,
     loopless: bool = False,
+    add_loopless_method: Optional[str] = None,
     fraction_of_optimum: float = 1.0,
     pfba_factor: Optional[float] = None,
     processes: Optional[int] = None,
@@ -163,6 +165,14 @@ def flux_variability_analysis(
        doi: 10.1093/bioinformatics/btv096.
 
     """
+    if add_loopless_method is not None and not loopless:
+        raise ValueError("The `add_loopless_method` argument can be used only if loopless=True.")
+
+    if loopless:
+        # TODO: @isaf27
+        # find_cyclic_reactions
+        pass
+
     if reaction_list is None:
         reaction_ids = [r.id for r in model.reactions]
     else:
