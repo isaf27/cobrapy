@@ -1,5 +1,6 @@
 from typing import TYPE_CHECKING, Optional, List, Tuple
 
+import time
 import numpy as np
 import optlang
 from optlang.symbolics import Zero
@@ -77,8 +78,10 @@ def find_cyclic_reactions(
         zero_cutoff,
         bound
     )
-    
+
     candidate_reactions = list(range(n))
+    can_positive = [False] * n
+    can_negative = [False] * n
 
     if method == "optimized":
         is_active = [False] * n
@@ -111,6 +114,11 @@ def find_cyclic_reactions(
                         if not is_active[i] and abs(q_list[i].primal) > zero_cutoff:
                             is_active[i] = True
                             remove_coef[q_list[i]] = 0
+                            if q_list[i].primal > zero_cutoff:
+                                can_positive[i] = True
+                            else:
+                                can_negative[i] = True
+
                     found_active = True
                     lp.objective.set_linear_coefficients(remove_coef)
                     break
@@ -128,16 +136,20 @@ def find_cyclic_reactions(
 
         candidate_reactions = [i for i in range(n) if is_active[i]]
 
-    can_positive = [False] * n
-    can_negative = [False] * n
     lp.objective = model.problem.Objective(Zero, direction="max")
     for i in candidate_reactions:
         for dir in ["min", "max"]:
+            if (dir == "min" and can_negative[i]) or (dir == "max" and can_positive[i]):
+                continue
+
+            if directions_int[i, int(dir == "max")] == 0:
+                continue
+
             lp.objective.set_linear_coefficients({q_list[i]: 1.0 if dir == "max" else -1.0})
-            
+
             lp.optimize()
             sutil.check_solver_status(lp.status)
-            
+
             if lp.objective.value > zero_cutoff:
                 if dir == "max":
                     can_positive[i] = True
