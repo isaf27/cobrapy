@@ -60,7 +60,7 @@ def add_loopless(
     zero_cutoff = normalize_cutoff(model, zero_cutoff)
 
     if reactions is None and method == "fastSNP":
-        reactions, _ = find_cyclic_reactions(model, zero_cutoff=zero_cutoff)
+        reactions = find_cyclic_reactions(model, zero_cutoff=zero_cutoff)[0]
 
     reactions_to_constrain = [i for i, r in enumerate(model.reactions) if not r.boundary]
     if reactions is not None:

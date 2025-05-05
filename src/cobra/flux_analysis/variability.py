@@ -1,7 +1,7 @@
 """Provide variability based methods such as flux variability or gene essentiality."""
 
 import logging
-from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Union, Dict
 from warnings import warn
 
 import numpy as np
@@ -13,8 +13,9 @@ from ..util import ProcessPool
 from ..util import solver as sutil
 from .deletion import single_gene_deletion, single_reaction_deletion
 from .helpers import normalize_cutoff
-from .loopless import loopless_fva_iter
+from .loopless import loopless_fva_iter, add_loopless
 from .parsimonious import add_pfba
+from .find_cyclic_reactions import find_cyclic_reactions
 
 
 if TYPE_CHECKING:
@@ -88,12 +89,11 @@ def _fva_step(reaction_id: str) -> Tuple[str, float]:
     return reaction_id, value
 
 
-# TODO: @isaf27
 def flux_variability_analysis(
     model: "Model",
     reaction_list: Optional[List[Union["Reaction", str]]] = None,
     loopless: bool = False,
-    add_loopless_method: Optional[str] = None,
+    add_loopless_params: Optional[Dict[str, any]] = None,
     fraction_of_optimum: float = 1.0,
     pfba_factor: Optional[float] = None,
     processes: Optional[int] = None,
@@ -165,13 +165,8 @@ def flux_variability_analysis(
        doi: 10.1093/bioinformatics/btv096.
 
     """
-    if add_loopless_method is not None and not loopless:
-        raise ValueError("The `add_loopless_method` argument can be used only if loopless=True.")
-
-    if loopless:
-        # TODO: @isaf27
-        # find_cyclic_reactions
-        pass
+    if add_loopless_params is not None and not loopless:
+        raise ValueError("The `add_loopless_params` argument can be used only if loopless=True.")
 
     if reaction_list is None:
         reaction_ids = [r.id for r in model.reactions]
@@ -191,6 +186,31 @@ def flux_variability_analysis(
         },
         index=reaction_ids,
     )
+
+    reaction_ids_by_type = [
+        {
+            "minimum": [],
+            "maximum": [],
+        },
+        {
+            "minimum": [],
+            "maximum": [],
+        }
+    ]
+    if loopless:
+        cyclic_reactions, cyclic_directions = find_cyclic_reactions(model)
+        cyclic_reaction_index = {r_id: i for i, r_id in enumerate(cyclic_reactions)}
+        for r_id in reaction_ids:
+            i = cyclic_reaction_index.get(r_id)
+            for loc, dir in enumerate(("minimum", "maximum")):
+                if i is not None and cyclic_directions[i][loc]:
+                    reaction_ids_by_type[1][dir].append(r_id)
+                else:
+                    reaction_ids_by_type[0][dir].append(r_id)
+    else:
+        reaction_ids_by_type[0]["minimum"] = reaction_ids
+        reaction_ids_by_type[0]["maximum"] = reaction_ids
+
     prob = model.problem
     with model:
         # Safety check before setting up FVA.
@@ -239,25 +259,42 @@ def flux_variability_analysis(
             model.add_cons_vars([flux_sum, flux_sum_constraint])
 
         model.objective = Zero  # This will trigger the reset as well
-        for what in ("minimum", "maximum"):
-            if processes > 1:
-                # We create and destroy a new pool here in order to set the
-                # objective direction for all reactions. This creates a
-                # slight overhead but seems the most clean.
-                chunk_size = len(reaction_ids) // processes
-                with ProcessPool(
-                    processes,
-                    initializer=_init_worker,
-                    initargs=(model, loopless, what[:3]),
-                ) as pool:
-                    for rxn_id, value in pool.imap_unordered(
-                        _fva_step, reaction_ids, chunksize=chunk_size
-                    ):
+        for loopless, opt_reaction_ids in enumerate(reaction_ids_by_type):
+            if len(opt_reaction_ids["minimum"]) == 0 and len(opt_reaction_ids["maximum"]) == 0:
+                continue
+
+            step_loopless = loopless
+            if loopless and add_loopless_params is not None:
+                add_loopless(
+                    model,
+                    reactions=cyclic_reactions,
+                    **add_loopless_params,
+                )
+                step_loopless = False
+
+            for what in ("minimum", "maximum"):
+                if len(opt_reaction_ids[what]) == 0:
+                    continue
+
+                cur_processes = min(processes, len(opt_reaction_ids[what]))
+                if cur_processes > 1:
+                    # We create and destroy a new pool here in order to set the
+                    # objective direction for all reactions. This creates a
+                    # slight overhead but seems the most clean.
+                    chunk_size = len(opt_reaction_ids[what]) // cur_processes
+                    with ProcessPool(
+                        cur_processes,
+                        initializer=_init_worker,
+                        initargs=(model, step_loopless, what[:3]),
+                    ) as pool:
+                        for rxn_id, value in pool.imap_unordered(
+                            _fva_step, opt_reaction_ids[what], chunksize=chunk_size
+                        ):
+                            fva_result.at[rxn_id, what] = value
+                else:
+                    _init_worker(model, step_loopless, what[:3])
+                    for rxn_id, value in map(_fva_step, opt_reaction_ids[what]):
                         fva_result.at[rxn_id, what] = value
-            else:
-                _init_worker(model, loopless, what[:3])
-                for rxn_id, value in map(_fva_step, reaction_ids):
-                    fva_result.at[rxn_id, what] = value
 
     return fva_result[["minimum", "maximum"]]
 

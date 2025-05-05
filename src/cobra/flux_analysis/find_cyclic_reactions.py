@@ -57,7 +57,8 @@ def find_cyclic_reactions(
     model: "Model",
     zero_cutoff: Optional[float] = None,
     bound: float = 1e4,
-    method: str = "optimized"
+    method: str = "optimized",
+    required_stop_random_checks_num: int = 2
 ) -> List[str]:
     """
         TODO: @isaf27
@@ -84,22 +85,19 @@ def find_cyclic_reactions(
     can_negative = [False] * n
 
     if method == "optimized":
-        is_active = [False] * n
+        is_cyclic = [False] * n
 
-        random_checks_left_count = 3
-        def set_random_weights():
-            nonlocal random_checks_left_count
-            random_checks_left_count -= 1
-            
+        def set_reaction_weights():
             weights = np.random.uniform(0.5, 1.0, size=n) * (2 * np.random.randint(low=0, high=2, size=n) - 1)
-            weights /= np.sum(np.abs(weights))
-            lp.objective.set_linear_coefficients({q_list[i]: weights[i] for i in range(n) if not is_active[i]})
+            lp.objective.set_linear_coefficients({q_list[i]: weights[i] for i in range(n) if not is_cyclic[i]})
 
-        set_random_weights()
+        set_reaction_weights()
         dir_order = ["min", "max"]
+        current_stop_random_checks_num = 0
+        cyclic_reactions_num = 0
 
-        while True:
-            found_active = False
+        while cyclic_reactions_num < n and current_stop_random_checks_num < required_stop_random_checks_num:
+            found_cyclic = False
             reverse_dir_order = False
 
             for dir in dir_order:
@@ -111,30 +109,30 @@ def find_cyclic_reactions(
                 if abs(lp.objective.value) > zero_cutoff:
                     remove_coef = {}
                     for i in range(n):
-                        if not is_active[i] and abs(q_list[i].primal) > zero_cutoff:
-                            is_active[i] = True
+                        if not is_cyclic[i] and abs(q_list[i].primal) > zero_cutoff:
+                            is_cyclic[i] = True
+                            cyclic_reactions_num += 1
                             remove_coef[q_list[i]] = 0
                             if q_list[i].primal > zero_cutoff:
                                 can_positive[i] = True
                             else:
                                 can_negative[i] = True
 
-                    found_active = True
+                    found_cyclic = True
                     lp.objective.set_linear_coefficients(remove_coef)
+                    current_stop_random_checks_num = 0
                     break
 
                 reverse_dir_order = True
 
-            if not found_active:
-                if random_checks_left_count > 0:
-                    set_random_weights()
-                    continue
-                break
+            if not found_cyclic:
+                set_reaction_weights()
+                current_stop_random_checks_num += 1
 
             if reverse_dir_order:
                 dir_order.reverse()
 
-        candidate_reactions = [i for i in range(n) if is_active[i]]
+        candidate_reactions = [i for i in range(n) if is_cyclic[i]]
 
     lp.objective = model.problem.Objective(Zero, direction="max")
     for i in candidate_reactions:
@@ -159,6 +157,6 @@ def find_cyclic_reactions(
         lp.objective.set_linear_coefficients({q_list[i]: 0.0})
 
     cyclic_reactions = [model.reactions[internal[i]].id for i in range(n) if can_positive[i] or can_negative[i]]
-    cyclic_reactions_directions = [(can_positive[i], can_negative[i]) for i in range(n) if can_positive[i] or can_negative[i]]
+    cyclic_reactions_directions = [(can_negative[i], can_positive[i]) for i in range(n) if can_negative[i] or can_positive[i]]
 
     return cyclic_reactions, cyclic_reactions_directions
