@@ -1,12 +1,13 @@
-from typing import TYPE_CHECKING, Optional, List, Tuple
+"""Provides a function to find cyclic reactions in a metabolic model."""
 
-import time
+from typing import TYPE_CHECKING, List, Optional, Tuple
+
 import numpy as np
 import optlang
 from optlang.symbolics import Zero
 
-from ..util import solver as sutil
 from ..util import create_stoichiometric_matrix
+from ..util import solver as sutil
 from .helpers import normalize_cutoff
 
 
@@ -19,17 +20,17 @@ def _create_find_cyclic_reactions_problem(
     s_int: np.ndarray,
     directions_int: np.ndarray,
     zero_cutoff: float,
-    bound: float
+    bound: float,
 ) -> Tuple["optlang.interface.Model", List["optlang.interface.Variable"]]:
     model = solver.Model()
-    
+
     q_list = []
     for i in range(s_int.shape[1]):
         q = solver.Variable(
-            name=f'q_{i}',
-            lb=bound*min(0, directions_int[i, 0]),
-            ub=bound*max(0, directions_int[i, 1]),
-            problem=model
+            name=f"q_{i}",
+            lb=bound * min(0, directions_int[i, 0]),
+            ub=bound * max(0, directions_int[i, 1]),
+            problem=model,
         )
         q_list.append(q)
     model.add(q_list)
@@ -38,15 +39,13 @@ def _create_find_cyclic_reactions_problem(
         nnz_list = np.flatnonzero(np.abs(row) > zero_cutoff)
         if len(nnz_list) == 0:
             continue
-        constraint = solver.Constraint(
-            Zero,
-            lb=0.0,
-            ub=0.0,
-            problem=model,
-            name=f'row_{idx}'
-        )
+        constraint = solver.Constraint(Zero, lb=0, ub=0, name=f"row_{idx}")
         model.add([constraint], sloppy=True)
-        constraint.set_linear_coefficients({q_list[i]: row[i] for i in nnz_list})
+        model.constraints[f"row_{idx}"].set_linear_coefficients(
+            {q_list[i]: row[i] for i in nnz_list}
+        )
+
+    model.update()
 
     model.objective = solver.Objective(Zero)
 
@@ -58,11 +57,54 @@ def find_cyclic_reactions(
     zero_cutoff: Optional[float] = None,
     bound: float = 1e4,
     method: str = "optimized",
-    required_stop_random_checks_num: int = 2
-) -> List[str]:
+    required_stop_checks_num: int = 2,
+) -> Tuple[List[str], List[Tuple[bool, bool]]]:
+    """Find all reactions, that can be in a loop in a steady state flux distribution.
+
+    Parameters
+    ----------
+    model : cobra.Model
+        The metabolic model to analyze.
+    zero_cutoff : float, optional
+        The cutoff value to consider a flux as zero.
+        The default uses the `model.tolerance` (default None).
+    bound : float, optional
+        The bound for the reaction fluxes in the optimization problem.
+        (default is 1e4).
+    method : str, optional
+        The method to use for finding cyclic reactions.
+        Options are "optimized" (default) or "basic".
+        See notes for details.
+    required_stop_checks_num : int, optional
+        This parameter is used only for the "optimized" method.
+        The number of random checks to pass to prove that all cyclic
+        reactions were found. (default is 2).
+
+    Returns
+    -------
+    A tuple containing two lists:
+        - A list of reaction IDs that can be part of a loop.
+        - A list of tuples indicating the possible directions of
+          reactions from the first list in the loop.
+          Each tuple contains two boolean values: (can_be_negative, can_be_positive).
+
+    Notes
+    -----
+    The "basic" method for each reaction and direction checks if it can be a part of
+    a loop by optimizing linear programming problem.
+
+    The "optimized" method uses a faster randomized approach to firstly find all
+    reactions that can be part of a loop and then checks their directions. This method
+    usually works at least 2 times faster than the "basic" method.
+    The `required_stop_checks_num` parameter is used to descrease the probability
+    of missing some cyclic reactions.
     """
-        TODO: @isaf27
-    """
+
+    if required_stop_checks_num < 1:
+        raise ValueError(
+            "The `required_stop_checks_num` parameter must be greater than 0."
+        )
+
     zero_cutoff = normalize_cutoff(model, zero_cutoff)
 
     internal = [i for i, r in enumerate(model.reactions) if not r.boundary]
@@ -73,11 +115,7 @@ def find_cyclic_reactions(
     directions_int = np.sign(bounds_int)
 
     lp, q_list = _create_find_cyclic_reactions_problem(
-        model.problem,
-        s_int,
-        directions_int,
-        zero_cutoff,
-        bound
+        model.problem, s_int, directions_int, zero_cutoff, bound
     )
 
     candidate_reactions = list(range(n))
@@ -88,15 +126,18 @@ def find_cyclic_reactions(
         is_cyclic = [False] * n
 
         def set_reaction_weights():
-            weights = np.random.uniform(0.5, 1.0, size=n) * (2 * np.random.randint(low=0, high=2, size=n) - 1)
-            lp.objective.set_linear_coefficients({q_list[i]: weights[i] for i in range(n) if not is_cyclic[i]})
+            signs = 2 * np.random.randint(low=0, high=2, size=n) - 1
+            weights = np.random.uniform(0.5, 1.0, size=n) * signs
+            lp.objective.set_linear_coefficients(
+                {q_list[i]: weights[i] for i in range(n) if not is_cyclic[i]}
+            )
 
         set_reaction_weights()
         dir_order = ["min", "max"]
-        current_stop_random_checks_num = 0
+        stop_checks_num = 0
         cyclic_reactions_num = 0
 
-        while cyclic_reactions_num < n and current_stop_random_checks_num < required_stop_random_checks_num:
+        while cyclic_reactions_num < n and stop_checks_num < required_stop_checks_num:
             found_cyclic = False
             reverse_dir_order = False
 
@@ -120,14 +161,14 @@ def find_cyclic_reactions(
 
                     found_cyclic = True
                     lp.objective.set_linear_coefficients(remove_coef)
-                    current_stop_random_checks_num = 0
+                    stop_checks_num = 0
                     break
 
                 reverse_dir_order = True
 
             if not found_cyclic:
                 set_reaction_weights()
-                current_stop_random_checks_num += 1
+                stop_checks_num += 1
 
             if reverse_dir_order:
                 dir_order.reverse()
@@ -143,7 +184,9 @@ def find_cyclic_reactions(
             if directions_int[i, int(dir == "max")] == 0:
                 continue
 
-            lp.objective.set_linear_coefficients({q_list[i]: 1.0 if dir == "max" else -1.0})
+            lp.objective.set_linear_coefficients(
+                {q_list[i]: 1.0 if dir == "max" else -1.0}
+            )
 
             lp.optimize()
             sutil.check_solver_status(lp.status)
@@ -156,7 +199,11 @@ def find_cyclic_reactions(
 
         lp.objective.set_linear_coefficients({q_list[i]: 0.0})
 
-    cyclic_reactions = [model.reactions[internal[i]].id for i in range(n) if can_positive[i] or can_negative[i]]
-    cyclic_reactions_directions = [(can_negative[i], can_positive[i]) for i in range(n) if can_negative[i] or can_positive[i]]
+    cyclic_reactions = []
+    cyclic_reactions_directions = []
+    for i in range(n):
+        if can_positive[i] or can_negative[i]:
+            cyclic_reactions.append(model.reactions[internal[i]].id)
+            cyclic_reactions_directions.append((can_negative[i], can_positive[i]))
 
     return cyclic_reactions, cyclic_reactions_directions

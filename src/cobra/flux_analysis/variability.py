@@ -1,7 +1,7 @@
 """Provide variability based methods such as flux variability or gene essentiality."""
 
 import logging
-from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Union, Dict
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 from warnings import warn
 
 import numpy as np
@@ -12,10 +12,10 @@ from ..core import Configuration, get_solution
 from ..util import ProcessPool
 from ..util import solver as sutil
 from .deletion import single_gene_deletion, single_reaction_deletion
-from .helpers import normalize_cutoff
-from .loopless import loopless_fva_iter, add_loopless
-from .parsimonious import add_pfba
 from .find_cyclic_reactions import find_cyclic_reactions
+from .helpers import normalize_cutoff
+from .loopless import add_loopless, loopless_fva_iter
+from .parsimonious import add_pfba
 
 
 if TYPE_CHECKING:
@@ -110,6 +110,13 @@ def flux_variability_analysis(
     loopless : bool, optional
         Whether to return only loopless solutions. This is significantly
         slower. Please also refer to the notes (default False).
+    add_loopless_params : dict, optional
+        If not set, `add_loopless` will not be used. Otherwise, this
+        dictionary will be used to pass parameters to the `add_loopless`
+        function. The parameters are passed as keyword arguments, so the
+        keys of the dictionary should match the parameter names of
+        `add_loopless`. This parameter can be used only if `loopless`
+        is set to True.
     fraction_of_optimum : float, optional
         Must be <= 1.0. Requires that the objective value is at least the
         fraction times maximum objective value. A value of 0.85 for instance
@@ -145,11 +152,16 @@ def flux_variability_analysis(
     sub-optimal.
 
     Using the loopless option will lead to a significant increase in
-    computation time (about a factor of 100 for large models). However, the
-    algorithm used here (see [2]_) is still more than 1000x faster than the
-    "naive" version using `add_loopless(model)`. Also note that if you have
-    included constraints that force a loop (for instance by setting all fluxes
-    in a loop to be non-zero) this loop will be included in the solution.
+    computation time (about a factor of 100 for large models).
+
+    If `add_loopless_params` is not set, the loops removal algorithm will be
+    used (see [2]_). This algorithm does not guarantee to find optimal bounds.
+
+    If `add_loopless_params` is set, the `add_loopless` function will be
+    used to add constraints that will remove loops from the model. Please
+    refer to the documentation of `add_loopless` for more information on
+    the parameters, or just use `{}` to use the default parameters. In this
+    case, the efficient Fast-SNP algorithm (see [3]_) will be used.
 
     References
     ----------
@@ -164,9 +176,14 @@ def flux_variability_analysis(
        Bioinformatics. 2015 Jul 1;31(13):2159-65.
        doi: 10.1093/bioinformatics/btv096.
 
+    .. [3] Fast-SNP: a fast matrix pre-processing algorithm for efficient
+       loopless flux optimization of metabolic models. Saa PA, Nielsen LK.
+       Bioinformatics. 2016 Dec;32(24):3807–3814. doi: 10.1093/bioinformatics/btw555.
     """
     if add_loopless_params is not None and not loopless:
-        raise ValueError("The `add_loopless_params` argument can be used only if loopless=True.")
+        raise ValueError(
+            "The `add_loopless_params` argument can be used only if loopless=True."
+        )
 
     if reaction_list is None:
         reaction_ids = [r.id for r in model.reactions]
@@ -195,7 +212,7 @@ def flux_variability_analysis(
         {
             "minimum": [],
             "maximum": [],
-        }
+        },
     ]
     if loopless:
         cyclic_reactions, cyclic_directions = find_cyclic_reactions(model)
@@ -259,8 +276,8 @@ def flux_variability_analysis(
             model.add_cons_vars([flux_sum, flux_sum_constraint])
 
         model.objective = Zero  # This will trigger the reset as well
-        for loopless, opt_reaction_ids in enumerate(reaction_ids_by_type):
-            if len(opt_reaction_ids["minimum"]) == 0 and len(opt_reaction_ids["maximum"]) == 0:
+        for loopless, opt_rxn_ids in enumerate(reaction_ids_by_type):
+            if len(opt_rxn_ids["minimum"]) == 0 and len(opt_rxn_ids["maximum"]) == 0:
                 continue
 
             step_loopless = loopless
@@ -273,27 +290,27 @@ def flux_variability_analysis(
                 step_loopless = False
 
             for what in ("minimum", "maximum"):
-                if len(opt_reaction_ids[what]) == 0:
+                if len(opt_rxn_ids[what]) == 0:
                     continue
 
-                cur_processes = min(processes, len(opt_reaction_ids[what]))
+                cur_processes = min(processes, len(opt_rxn_ids[what]))
                 if cur_processes > 1:
                     # We create and destroy a new pool here in order to set the
                     # objective direction for all reactions. This creates a
                     # slight overhead but seems the most clean.
-                    chunk_size = len(opt_reaction_ids[what]) // cur_processes
+                    chunk_size = len(opt_rxn_ids[what]) // cur_processes
                     with ProcessPool(
                         cur_processes,
                         initializer=_init_worker,
                         initargs=(model, step_loopless, what[:3]),
                     ) as pool:
                         for rxn_id, value in pool.imap_unordered(
-                            _fva_step, opt_reaction_ids[what], chunksize=chunk_size
+                            _fva_step, opt_rxn_ids[what], chunksize=chunk_size
                         ):
                             fva_result.at[rxn_id, what] = value
                 else:
                     _init_worker(model, step_loopless, what[:3])
-                    for rxn_id, value in map(_fva_step, opt_reaction_ids[what]):
+                    for rxn_id, value in map(_fva_step, opt_rxn_ids[what]):
                         fva_result.at[rxn_id, what] = value
 
     return fva_result[["minimum", "maximum"]]

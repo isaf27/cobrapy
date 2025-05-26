@@ -1,19 +1,21 @@
+"""Provides Fast-SNP algorithm implementation for finding nullspace basis of matrix."""
+
+from typing import List, Tuple
+
 import numpy as np
-
-from typing import Tuple, List
-
 import optlang
-from optlang.interface import Model, Variable, OPTIMAL
+from optlang.interface import OPTIMAL, Model, Variable
 from optlang.symbolics import Zero
 
 
-def _solve_snv(weights: np.ndarray, model: Model, v_list: List[Variable], positive: bool) -> np.ndarray:
+def _solve_snv(
+    weights: np.ndarray, model: Model, v_list: List[Variable], positive: bool
+) -> np.ndarray:
     dir = 1 if positive else -1
 
-    model.constraints["nonzero_constraint"].set_linear_coefficients({
-        variable: weight * dir
-        for variable, weight in zip(v_list, weights)
-    })
+    model.constraints["nonzero_constraint"].set_linear_coefficients(
+        {variable: weight * dir for variable, weight in zip(v_list, weights)}
+    )
 
     model.optimize()
     if model.status != OPTIMAL:
@@ -40,43 +42,50 @@ def _create_fast_snp_problem(
     v_list = []
 
     for i in range(n):
-        x = solver.Variable(name=f'x_{i}', lb=0, problem=model)
-        v = solver.Variable(name=f'v_{i}', 
-                            lb=v_bound*min(directions[i, 0], 0),
-                            ub=v_bound*max(directions[i, 1], 0),
-                            problem=model)
+        x = solver.Variable(name=f"x_{i}", lb=0, problem=model)
+        v = solver.Variable(
+            name=f"v_{i}",
+            lb=v_bound * min(directions[i, 0], 0),
+            ub=v_bound * max(directions[i, 1], 0),
+            problem=model,
+        )
         model.add([x, v])
         x_list.append(x)
         v_list.append(v)
-        
-        constraint1 = solver.Constraint(Zero, lb=0.0, problem=model, name=f'modulo_constraint1_{i}')
-        constraint2 = solver.Constraint(Zero, lb=0.0, problem=model, name=f'modulo_constraint2_{i}')
+
+        constraint1 = solver.Constraint(Zero, lb=0.0, name=f"modulo_constraint1_{i}")
+        constraint2 = solver.Constraint(Zero, lb=0.0, name=f"modulo_constraint2_{i}")
         model.add([constraint1, constraint2], sloppy=True)
-        
-        constraint1.set_linear_coefficients({x: 1.0, v: -1.0})
-        constraint2.set_linear_coefficients({x: 1.0, v: 1.0})
+
+        model.constraints[f"modulo_constraint1_{i}"].set_linear_coefficients(
+            {x: 1.0, v: -1.0}
+        )
+        model.constraints[f"modulo_constraint2_{i}"].set_linear_coefficients(
+            {x: 1.0, v: 1.0}
+        )
 
     for idx, row in enumerate(S):
         nnz_list = np.flatnonzero(np.abs(row) > zero_cutoff)
         if len(nnz_list) == 0:
             continue
 
-        constraint = solver.Constraint(
-            Zero,
-            lb=0.0,
-            ub=0.0,
-            problem=model,
-            name=f'row_{idx}'
-        )
+        constraint = solver.Constraint(Zero, lb=0.0, ub=0.0, name=f"row_{idx}")
         model.add([constraint], sloppy=True)
-        constraint.set_linear_coefficients({v_list[i]: row[i] for i in nnz_list})
+        model.constraints[f"row_{idx}"].set_linear_coefficients(
+            {x_list[i]: row[i] for i in nnz_list}
+        )
 
-    model.add([solver.Constraint(
-        Zero,
-        lb=bias,
-        problem=model,
-        name="nonzero_constraint",
-    )], sloppy=True)
+    model.add(
+        [
+            solver.Constraint(
+                Zero,
+                lb=bias,
+                problem=model,
+                name="nonzero_constraint",
+            )
+        ],
+        sloppy=True,
+    )
 
     model.objective = solver.Objective(Zero)
     model.objective.set_linear_coefficients({x: 1 for x in x_list})
@@ -101,11 +110,57 @@ def nullspace_fast_snp(
     zero_cutoff: float = 1e-6,
     bias: float = 1e-3,
 ) -> np.ndarray:
-    """
-        TODO: @isaf27
+    """Compute an approximate basis for the nullspace of S with coordinate directions.
+
+    The algorithm used by this function is described in [1]_.
+
+    Parameters
+    ----------
+    solver : "optlang.interface"
+        The solver interface to use for the optimization problem.
+        You can use `model.problem` to get the solver interface.
+    S : numpy.ndarray
+        The matrix for which the nullspace is computed.
+        `S` should be a 2-D array.
+    directions : numpy.ndarray
+        A 2-D array with shape (k, 2) where `k` is the number of columns in `S`.
+        This array specifies the directions of coordinates.
+        Each row should be:
+            - [0, 0] for coordinates that can be only zero
+            - [0, 1] for coordinates that can be only positive
+            - [-1, 0] for coordinates that can be only negative
+            - [-1, 1] for coordinates that can be both positive and negative
+    v_bound : float, optional
+        The bound for the variables in the optimization problem (default 1e4).
+    zero_cutoff : float, optional
+        The cutoff value to consider a coordinate value as zero (default 1e-6).
+    bias : float, optional
+        The bias for the non-zero constraint in the optimization problem
+        (default 1e-3).
+
+    Returns
+    -------
+    numpy.ndarray
+        If `S` is an array with shape (m, k), then an array
+        with shape (k, n) will be returned, where `n` is the dimension of the
+        nullspace of `S` with `directions`. Each column of this array is a basis
+        vector for the nullspace; each element in numpy.dot(S, column) will be
+        approximately zero. Each coordinate in the column will have an allowed
+        sign according to the `directions` parameter.
+
+    References
+    ----------
+    .. [1] Fast-SNP: a fast matrix pre-processing algorithm for efficient
+       loopless flux optimization of metabolic models. Saa PA, Nielsen LK.
+       Bioinformatics. 2016 Dec;32(24):3807–3814. doi: 10.1093/bioinformatics/btw555.
     """
 
-    problem, v_list = _create_fast_snp_problem(solver, S, directions, v_bound, zero_cutoff, bias)
+    if len(S.shape) != 2 or S.shape[0] == 0 or S.shape[1] == 0:
+        raise ValueError("Input matrix S must be a 2D array with non-zero dimensions.")
+
+    problem, v_list = _create_fast_snp_problem(
+        solver, S, directions, v_bound, zero_cutoff, bias
+    )
 
     n = S.shape[1]
     N = np.zeros((0, n))
