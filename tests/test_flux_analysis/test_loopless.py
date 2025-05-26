@@ -42,13 +42,14 @@ def ll_test_model(request: pytest.FixtureRequest) -> Model:
     return test_model
 
 
-def test_loopless_benchmark_before(benchmark: Callable) -> None:
+@pytest.mark.parametrize("method", ["fastSNP", "original"])
+def test_loopless_benchmark_before(benchmark: Callable, method: str) -> None:
     """Benchmark initial condition."""
     test_model = construct_ll_test_model()
 
     def _():
         with test_model:
-            add_loopless(test_model)
+            add_loopless(test_model, method=method)
             test_model.optimize()
 
     benchmark(_)
@@ -81,9 +82,10 @@ def test_loopless_solution_fluxes(model: Model) -> None:
     assert ll_solution.objective_value == pytest.approx(sol.objective_value)
 
 
-def test_add_loopless(ll_test_model: Model) -> None:
+@pytest.mark.parametrize("method", ["fastSNP", "original"])
+def test_add_loopless(ll_test_model: Model, method: str) -> None:
     """Test add_loopless()."""
-    add_loopless(ll_test_model)
+    add_loopless(ll_test_model, method=method)
     feasible_status = ll_test_model.optimize().status
     ll_test_model.reactions.v3.lower_bound = 1
     ll_test_model.slim_optimize()

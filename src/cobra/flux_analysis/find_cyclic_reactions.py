@@ -57,7 +57,7 @@ def find_cyclic_reactions(
     zero_cutoff: Optional[float] = None,
     bound: float = 1e4,
     method: str = "optimized",
-    required_stop_checks_num: int = 2,
+    required_stop_checks_num: int = 3,
 ) -> Tuple[List[str], List[Tuple[bool, bool]]]:
     """Find all reactions, that can be in a loop in a steady state flux distribution.
 
@@ -78,7 +78,7 @@ def find_cyclic_reactions(
     required_stop_checks_num : int, optional
         This parameter is used only for the "optimized" method.
         The number of random checks to pass to prove that all cyclic
-        reactions were found. (default is 2).
+        reactions were found. (default is 3).
 
     Returns
     -------

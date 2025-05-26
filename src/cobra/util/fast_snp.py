@@ -72,7 +72,7 @@ def _create_fast_snp_problem(
         constraint = solver.Constraint(Zero, lb=0.0, ub=0.0, name=f"row_{idx}")
         model.add([constraint], sloppy=True)
         model.constraints[f"row_{idx}"].set_linear_coefficients(
-            {x_list[i]: row[i] for i in nnz_list}
+            {v_list[i]: row[i] for i in nnz_list}
         )
 
     model.add(
@@ -80,7 +80,6 @@ def _create_fast_snp_problem(
             solver.Constraint(
                 Zero,
                 lb=bias,
-                problem=model,
                 name="nonzero_constraint",
             )
         ],
