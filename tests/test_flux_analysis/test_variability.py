@@ -60,7 +60,8 @@ def test_pfba_flux_variability(
     assert comparison["maximum"].all()
 
 
-def test_loopless_pfba_fva(model: Model) -> None:
+@pytest.mark.parametrize("method", ["", "original", "fastSNP"])
+def test_loopless_pfba_fva(model: Model, method: str) -> None:
     """Test loopless FVA using pFBA."""
     loop_reactions = [model.reactions.get_by_id(rid) for rid in ("FRD7", "SUCDi")]
     fva_loopless = flux_variability_analysis(
@@ -68,6 +69,7 @@ def test_loopless_pfba_fva(model: Model) -> None:
         pfba_factor=1.1,
         reaction_list=loop_reactions,
         loopless=True,
+        add_loopless_params=(None if len(method) == 0 else {"method": method}),
         processes=1,
     )
     assert np.allclose(fva_loopless["maximum"], fva_loopless["minimum"])
@@ -97,8 +99,9 @@ def test_parallel_flux_variability(
 
 
 # Loopless FVA
+@pytest.mark.parametrize("method", ["", "original", "fastSNP"])
 def test_flux_variability_loopless_benchmark(
-    model: Model, benchmark: Callable, all_solvers: List[str]
+    model: Model, benchmark: Callable, all_solvers: List[str], method: str
 ) -> None:
     """Benchmark loopless FVA."""
     model.solver = all_solvers
@@ -106,17 +109,24 @@ def test_flux_variability_loopless_benchmark(
         flux_variability_analysis,
         model,
         loopless=True,
+        add_loopless_params=(None if len(method) == 0 else {"method": method}),
         reaction_list=model.reactions[1::50],
     )
 
 
-def test_flux_variability_loopless(model: Model, all_solvers: List[str]) -> None:
+@pytest.mark.parametrize("method", ["", "original", "fastSNP"])
+def test_flux_variability_loopless(
+    model: Model, all_solvers: List[str], method: str
+) -> None:
     """Test loopless FVA."""
     model.solver = all_solvers
     loop_reactions = [model.reactions.get_by_id(rid) for rid in ("FRD7", "SUCDi")]
     fva_normal = flux_variability_analysis(model, reaction_list=loop_reactions)
     fva_loopless = flux_variability_analysis(
-        model, reaction_list=loop_reactions, loopless=True
+        model,
+        reaction_list=loop_reactions,
+        loopless=True,
+        add_loopless_params=(None if len(method) == 0 else {"method": method}),
     )
 
     assert not np.allclose(fva_normal["maximum"], fva_normal["minimum"])
