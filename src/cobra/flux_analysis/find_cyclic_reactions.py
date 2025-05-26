@@ -100,6 +100,11 @@ def find_cyclic_reactions(
     of missing some cyclic reactions.
     """
 
+    if method not in ["optimized", "basic"]:
+        raise ValueError(
+            "The `method` parameter must be either 'optimized' or 'basic'."
+        )
+
     if required_stop_checks_num < 1:
         raise ValueError(
             "The `required_stop_checks_num` parameter must be greater than 0."
