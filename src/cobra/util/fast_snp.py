@@ -38,31 +38,46 @@ def _create_fast_snp_problem(
     n = S.shape[1]
 
     model = solver.Model()
-    x_list = []
+    modulo_list = []
     v_list = []
 
     for i in range(n):
-        x = solver.Variable(name=f"x_{i}", lb=0, problem=model)
         v = solver.Variable(
             name=f"v_{i}",
             lb=v_bound * min(directions[i, 0], 0),
             ub=v_bound * max(directions[i, 1], 0),
             problem=model,
         )
-        model.add([x, v])
-        x_list.append(x)
+        model.add([v])
         v_list.append(v)
 
-        constraint1 = solver.Constraint(Zero, lb=0.0, name=f"modulo_constraint1_{i}")
-        constraint2 = solver.Constraint(Zero, lb=0.0, name=f"modulo_constraint2_{i}")
-        model.add([constraint1, constraint2], sloppy=True)
+        if directions[i, 0] == 0:
+            modulo_list.append((v, 1))
+        elif directions[i, 1] == 0:
+            modulo_list.append((v, -1))
+        else:
+            x = solver.Variable(name=f"x_{i}", lb=0, problem=model)
+            model.add([x])
+            modulo_list.append((x, 1))
 
-        model.constraints[f"modulo_constraint1_{i}"].set_linear_coefficients(
-            {x: 1.0, v: -1.0}
-        )
-        model.constraints[f"modulo_constraint2_{i}"].set_linear_coefficients(
-            {x: 1.0, v: 1.0}
-        )
+            constraint1 = solver.Constraint(
+                Zero,
+                lb=0.0,
+                name=f"modulo_constraint1_{i}",
+            )
+            constraint2 = solver.Constraint(
+                Zero,
+                lb=0.0,
+                name=f"modulo_constraint2_{i}",
+            )
+            model.add([constraint1, constraint2], sloppy=True)
+
+            model.constraints[f"modulo_constraint1_{i}"].set_linear_coefficients(
+                {x: 1.0, v: -1.0}
+            )
+            model.constraints[f"modulo_constraint2_{i}"].set_linear_coefficients(
+                {x: 1.0, v: 1.0}
+            )
 
     for idx, row in enumerate(S):
         nnz_list = np.flatnonzero(np.abs(row) > zero_cutoff)
@@ -87,7 +102,7 @@ def _create_fast_snp_problem(
     )
 
     model.objective = solver.Objective(Zero)
-    model.objective.set_linear_coefficients({x: 1 for x in x_list})
+    model.objective.set_linear_coefficients({x: coef for (x, coef) in modulo_list})
     model.objective.direction = "min"
 
     return model, v_list
@@ -98,7 +113,7 @@ def _project(N: np.ndarray, w: np.ndarray) -> np.ndarray:
 
 
 def _get_condition_vector(N: np.ndarray) -> np.ndarray:
-    return _project(N, np.random.uniform(-1.0, 1.0, size=N.shape[1]))
+    return _project(N, np.random.normal(size=N.shape[1]))
 
 
 def nullspace_fast_snp(
@@ -107,7 +122,8 @@ def nullspace_fast_snp(
     directions: np.ndarray,
     v_bound: float = 1e4,
     zero_cutoff: float = 1e-6,
-    bias: float = 1e-3,
+    bias: float = 1,
+    required_stop_checks_num: int = 3,
 ) -> np.ndarray:
     """Compute an approximate basis for the nullspace of S with coordinate directions.
 
@@ -135,7 +151,10 @@ def nullspace_fast_snp(
         The cutoff value to consider a coordinate value as zero (default 1e-6).
     bias : float, optional
         The bias for the non-zero constraint in the optimization problem
-        (default 1e-3).
+        (default 1).
+    required_stop_checks_num : int, optional
+        The number of random checks to pass to prove that basis
+        could not be expanded (default 3).
 
     Returns
     -------
@@ -164,16 +183,19 @@ def nullspace_fast_snp(
     n = S.shape[1]
     N = np.zeros((0, n))
     U = np.zeros((0, n))
+    stop_checks_num = 0
 
-    for _ in range(n):
+    while N.shape[0] < n and stop_checks_num < required_stop_checks_num:
         weights = _get_condition_vector(U)
 
         v1 = _solve_snv(weights, problem, v_list, True)
         v2 = _solve_snv(weights, problem, v_list, False)
 
         if v1 is None and v2 is None:
-            break
+            stop_checks_num += 1
+            continue
 
+        stop_checks_num = 0
         v = v1
         if v1 is None:
             v = v2
