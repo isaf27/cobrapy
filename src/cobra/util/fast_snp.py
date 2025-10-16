@@ -11,6 +11,8 @@ from optlang.symbolics import Zero
 def _solve_snv(
     weights: np.ndarray, model: Model, v_list: List[Variable], positive: bool
 ) -> np.ndarray:
+    """Optimize Fast-SNP step for given weights and direction."""
+
     dir = 1 if positive else -1
 
     model.constraints["nonzero_constraint"].set_linear_coefficients(
@@ -35,6 +37,8 @@ def _create_fast_snp_problem(
     zero_cutoff: float,
     bias: float,
 ) -> Tuple[Model, List[Variable]]:
+    """Create an optimization problem for Fast-SNP algorithm."""
+
     n = S.shape[1]
 
     model = solver.Model()
@@ -109,10 +113,12 @@ def _create_fast_snp_problem(
 
 
 def _project(N: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Project vector w to the complement of the row space of N."""
     return w - (N.T @ (N @ w))
 
 
 def _get_condition_vector(N: np.ndarray) -> np.ndarray:
+    """Get a random Fast-SNP nonzero condition vector."""
     return _project(N, np.random.normal(size=N.shape[1]))
 
 

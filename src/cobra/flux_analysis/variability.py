@@ -1,7 +1,7 @@
 """Provide variability based methods such as flux variability or gene essentiality."""
 
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Union
 from warnings import warn
 
 import numpy as np
@@ -92,8 +92,7 @@ def _fva_step(reaction_id: str) -> Tuple[str, float]:
 def flux_variability_analysis(
     model: "Model",
     reaction_list: Optional[List[Union["Reaction", str]]] = None,
-    loopless: bool = False,
-    add_loopless_params: Optional[Dict[str, any]] = None,
+    loopless: Union[Optional[str], bool] = None,
     fraction_of_optimum: float = 1.0,
     pfba_factor: Optional[float] = None,
     processes: Optional[int] = None,
@@ -107,16 +106,11 @@ def flux_variability_analysis(
     reaction_list : list of cobra.Reaction or str, optional
         The reactions for which to obtain min/max fluxes. If None will use
         all reactions in the model (default None).
-    loopless : bool, optional
-        Whether to return only loopless solutions. This is significantly
-        slower. Please also refer to the notes (default False).
-    add_loopless_params : dict, optional
-        If not set, `add_loopless` will not be used. Otherwise, this
-        dictionary will be used to pass parameters to the `add_loopless`
-        function. The parameters are passed as keyword arguments, so the
-        keys of the dictionary should match the parameter names of
-        `add_loopless`. This parameter can be used only if `loopless`
-        is set to True.
+    loopless : str, "fastSNP" or "cycleFreeFlux", optional
+        If this value is set, only loopless solutions will be returned.
+        Boolean values are deprecated. Provided value means the algorithm
+        to constrain the model to loopless solutions.
+        Please also refer to the notes (default None).
     fraction_of_optimum : float, optional
         Must be <= 1.0. Requires that the objective value is at least the
         fraction times maximum objective value. A value of 0.85 for instance
@@ -154,14 +148,12 @@ def flux_variability_analysis(
     Using the loopless option will lead to a significant increase in
     computation time (about a factor of 100 for large models).
 
-    If `add_loopless_params` is not set, the loops removal algorithm will be
-    used (see [2]_). This algorithm does not guarantee to find optimal bounds.
+    If `loopless` is set to "fastSNP", the optimal loopless flux bounds will be
+    found by adding the loopless constraints to the model using efficient
+    Fast-SNP algorithm (see [2]_).
 
-    If `add_loopless_params` is set, the `add_loopless` function will be
-    used to add constraints that will remove loops from the model. Please
-    refer to the documentation of `add_loopless` for more information on
-    the parameters, or just use `{}` to use the default parameters. In this
-    case, the efficient Fast-SNP algorithm (see [3]_) will be used.
+    If `loopless` is set to "cycleFreeFlux", the loops removal algorithm will be
+    used (see [3]_). Note: this algorithm does not guarantee to find optimal bounds.
 
     References
     ----------
@@ -170,19 +162,28 @@ def flux_variability_analysis(
        BMC Bioinformatics. 2010 Sep 29;11:489.
        doi: 10.1186/1471-2105-11-489, PMID: 20920235
 
-    .. [2] CycleFreeFlux: efficient removal of thermodynamically infeasible
+    .. [2] Fast-SNP: a fast matrix pre-processing algorithm for efficient
+       loopless flux optimization of metabolic models. Saa PA, Nielsen LK.
+       Bioinformatics. 2016 Dec;32(24):3807–3814. doi: 10.1093/bioinformatics/btw555.
+
+    .. [3] CycleFreeFlux: efficient removal of thermodynamically infeasible
        loops from flux distributions.
        Desouki AA, Jarre F, Gelius-Dietrich G, Lercher MJ.
        Bioinformatics. 2015 Jul 1;31(13):2159-65.
        doi: 10.1093/bioinformatics/btv096.
-
-    .. [3] Fast-SNP: a fast matrix pre-processing algorithm for efficient
-       loopless flux optimization of metabolic models. Saa PA, Nielsen LK.
-       Bioinformatics. 2016 Dec;32(24):3807–3814. doi: 10.1093/bioinformatics/btw555.
     """
-    if add_loopless_params is not None and not loopless:
+    if loopless is not None and isinstance(loopless, bool):
+        warn(
+            "Passing a boolean value to the `loopless` argument is deprecated. "
+            "Please pass either None, 'fastSNP' or 'cycleFreeFlux'.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        loopless = "cycleFreeFlux" if loopless else None
+
+    if loopless not in (None, "fastSNP", "cycleFreeFlux"):
         raise ValueError(
-            "The `add_loopless_params` argument can be used only if loopless=True."
+            "The `loopless` argument must be either None, 'fastSNP' or 'cycleFreeFlux'."
         )
 
     if reaction_list is None:
@@ -214,7 +215,7 @@ def flux_variability_analysis(
             "maximum": [],
         },
     ]
-    if loopless:
+    if loopless is not None:
         cyclic_reactions, cyclic_directions = find_cyclic_reactions(model)
         cyclic_reaction_index = {r_id: i for i, r_id in enumerate(cyclic_reactions)}
         for r_id in reaction_ids:
@@ -276,18 +277,18 @@ def flux_variability_analysis(
             model.add_cons_vars([flux_sum, flux_sum_constraint])
 
         model.objective = Zero  # This will trigger the reset as well
-        for loopless, opt_rxn_ids in enumerate(reaction_ids_by_type):
+        for loopless_reactions, opt_rxn_ids in enumerate(reaction_ids_by_type):
             if len(opt_rxn_ids["minimum"]) == 0 and len(opt_rxn_ids["maximum"]) == 0:
                 continue
 
-            step_loopless = loopless
-            if loopless and add_loopless_params is not None:
+            run_cycle_free_flux = bool(loopless_reactions)
+            if loopless_reactions and loopless == "fastSNP":
                 add_loopless(
                     model,
+                    method=loopless,
                     reactions=cyclic_reactions,
-                    **add_loopless_params,
                 )
-                step_loopless = False
+                run_cycle_free_flux = False
 
             for what in ("minimum", "maximum"):
                 if len(opt_rxn_ids[what]) == 0:
@@ -302,14 +303,14 @@ def flux_variability_analysis(
                     with ProcessPool(
                         cur_processes,
                         initializer=_init_worker,
-                        initargs=(model, step_loopless, what[:3]),
+                        initargs=(model, run_cycle_free_flux, what[:3]),
                     ) as pool:
                         for rxn_id, value in pool.imap_unordered(
                             _fva_step, opt_rxn_ids[what], chunksize=chunk_size
                         ):
                             fva_result.at[rxn_id, what] = value
                 else:
-                    _init_worker(model, step_loopless, what[:3])
+                    _init_worker(model, run_cycle_free_flux, what[:3])
                     for rxn_id, value in map(_fva_step, opt_rxn_ids[what]):
                         fva_result.at[rxn_id, what] = value
 

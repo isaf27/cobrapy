@@ -22,6 +22,11 @@ def _create_find_cyclic_reactions_problem(
     zero_cutoff: float,
     bound: float,
 ) -> Tuple["optlang.interface.Model", List["optlang.interface.Variable"]]:
+    """Create an optimization problem to find cyclic reactions.
+
+    This optimization problem includes only internal reactions, assumes
+    steady-state constraints, and enforces reaction directions.
+    """
     model = solver.Model()
 
     q_list = []
@@ -59,7 +64,7 @@ def find_cyclic_reactions(
     method: str = "optimized",
     required_stop_checks_num: int = 3,
 ) -> Tuple[List[str], List[Tuple[bool, bool]]]:
-    """Find all reactions, that can be in a loop in a steady state flux distribution.
+    """Find reactions, that can be in a loop in a steady state flux distribution.
 
     Parameters
     ----------
@@ -90,6 +95,13 @@ def find_cyclic_reactions(
 
     Notes
     -----
+    This function considers only the stoichiometric matrix and reaction directions.
+    Any other constraints present in the model are ignored.
+    * If a reaction is identified as cyclic, there may still be no feasible loop
+      when taking into account all bounds and additional constraints.
+    * However, if a reaction is identified as non-cyclic, it cannot participate
+      in any loop in a steady-state flux distribution.
+
     The "basic" method for each reaction and direction checks if it can be a part of
     a loop by optimizing linear programming problem.
 
