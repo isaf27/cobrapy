@@ -6,7 +6,8 @@ import numpy as np
 from optlang.symbolics import Zero
 
 from ..core import get_solution
-from ..util import create_stoichiometric_matrix, nullspace, nullspace_fast_snp
+from ..util import create_stoichiometric_matrix, nullspace
+from .fast_snp import nullspace_fast_snp
 from .find_cyclic_reactions import find_cyclic_reactions
 from .helpers import normalize_cutoff
 
