@@ -12,8 +12,9 @@ from ..core import Configuration, get_solution
 from ..util import ProcessPool
 from ..util import solver as sutil
 from .deletion import single_gene_deletion, single_reaction_deletion
+from .find_cyclic_reactions import find_cyclic_reactions
 from .helpers import normalize_cutoff
-from .loopless import loopless_fva_iter
+from .loopless import add_loopless, loopless_fva_iter
 from .parsimonious import add_pfba
 
 
@@ -91,7 +92,7 @@ def _fva_step(reaction_id: str) -> Tuple[str, float]:
 def flux_variability_analysis(
     model: "Model",
     reaction_list: Optional[List[Union["Reaction", str]]] = None,
-    loopless: bool = False,
+    loopless: Union[Optional[str], bool] = None,
     fraction_of_optimum: float = 1.0,
     pfba_factor: Optional[float] = None,
     processes: Optional[int] = None,
@@ -105,9 +106,11 @@ def flux_variability_analysis(
     reaction_list : list of cobra.Reaction or str, optional
         The reactions for which to obtain min/max fluxes. If None will use
         all reactions in the model (default None).
-    loopless : bool, optional
-        Whether to return only loopless solutions. This is significantly
-        slower. Please also refer to the notes (default False).
+    loopless : str, "fastSNP" or "cycleFreeFlux", optional
+        If this value is set, only loopless solutions will be returned.
+        Boolean values are deprecated. Provided value means the algorithm
+        to constrain the model to loopless solutions.
+        Please also refer to the notes (default None).
     fraction_of_optimum : float, optional
         Must be <= 1.0. Requires that the objective value is at least the
         fraction times maximum objective value. A value of 0.85 for instance
@@ -143,11 +146,14 @@ def flux_variability_analysis(
     sub-optimal.
 
     Using the loopless option will lead to a significant increase in
-    computation time (about a factor of 100 for large models). However, the
-    algorithm used here (see [2]_) is still more than 1000x faster than the
-    "naive" version using `add_loopless(model)`. Also note that if you have
-    included constraints that force a loop (for instance by setting all fluxes
-    in a loop to be non-zero) this loop will be included in the solution.
+    computation time (about a factor of 100 for large models).
+
+    If `loopless` is set to "fastSNP", the optimal loopless flux bounds will be
+    found by adding the loopless constraints to the model using efficient
+    Fast-SNP algorithm (see [2]_).
+
+    If `loopless` is set to "cycleFreeFlux", the loops removal algorithm will be
+    used (see [3]_). Note: this algorithm does not guarantee to find optimal bounds.
 
     References
     ----------
@@ -156,13 +162,30 @@ def flux_variability_analysis(
        BMC Bioinformatics. 2010 Sep 29;11:489.
        doi: 10.1186/1471-2105-11-489, PMID: 20920235
 
-    .. [2] CycleFreeFlux: efficient removal of thermodynamically infeasible
+    .. [2] Fast-SNP: a fast matrix pre-processing algorithm for efficient
+       loopless flux optimization of metabolic models. Saa PA, Nielsen LK.
+       Bioinformatics. 2016 Dec;32(24):3807–3814. doi: 10.1093/bioinformatics/btw555.
+
+    .. [3] CycleFreeFlux: efficient removal of thermodynamically infeasible
        loops from flux distributions.
        Desouki AA, Jarre F, Gelius-Dietrich G, Lercher MJ.
        Bioinformatics. 2015 Jul 1;31(13):2159-65.
        doi: 10.1093/bioinformatics/btv096.
-
     """
+    if loopless is not None and isinstance(loopless, bool):
+        warn(
+            "Passing a boolean value to the `loopless` argument is deprecated. "
+            "Please pass either None, 'fastSNP' or 'cycleFreeFlux'.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        loopless = "cycleFreeFlux" if loopless else None
+
+    if loopless not in (None, "fastSNP", "cycleFreeFlux"):
+        raise ValueError(
+            "The `loopless` argument must be either None, 'fastSNP' or 'cycleFreeFlux'."
+        )
+
     if reaction_list is None:
         reaction_ids = [r.id for r in model.reactions]
     else:
@@ -181,6 +204,31 @@ def flux_variability_analysis(
         },
         index=reaction_ids,
     )
+
+    reaction_ids_by_type = [
+        {
+            "minimum": [],
+            "maximum": [],
+        },
+        {
+            "minimum": [],
+            "maximum": [],
+        },
+    ]
+    if loopless is not None:
+        cyclic_reactions, cyclic_directions = find_cyclic_reactions(model)
+        cyclic_reaction_index = {r_id: i for i, r_id in enumerate(cyclic_reactions)}
+        for r_id in reaction_ids:
+            i = cyclic_reaction_index.get(r_id)
+            for loc, dir in enumerate(("minimum", "maximum")):
+                if i is not None and cyclic_directions[i][loc]:
+                    reaction_ids_by_type[1][dir].append(r_id)
+                else:
+                    reaction_ids_by_type[0][dir].append(r_id)
+    else:
+        reaction_ids_by_type[0]["minimum"] = reaction_ids
+        reaction_ids_by_type[0]["maximum"] = reaction_ids
+
     prob = model.problem
     with model:
         # Safety check before setting up FVA.
@@ -229,25 +277,42 @@ def flux_variability_analysis(
             model.add_cons_vars([flux_sum, flux_sum_constraint])
 
         model.objective = Zero  # This will trigger the reset as well
-        for what in ("minimum", "maximum"):
-            if processes > 1:
-                # We create and destroy a new pool here in order to set the
-                # objective direction for all reactions. This creates a
-                # slight overhead but seems the most clean.
-                chunk_size = len(reaction_ids) // processes
-                with ProcessPool(
-                    processes,
-                    initializer=_init_worker,
-                    initargs=(model, loopless, what[:3]),
-                ) as pool:
-                    for rxn_id, value in pool.imap_unordered(
-                        _fva_step, reaction_ids, chunksize=chunk_size
-                    ):
+        for loopless_reactions, opt_rxn_ids in enumerate(reaction_ids_by_type):
+            if len(opt_rxn_ids["minimum"]) == 0 and len(opt_rxn_ids["maximum"]) == 0:
+                continue
+
+            run_cycle_free_flux = bool(loopless_reactions)
+            if loopless_reactions and loopless == "fastSNP":
+                add_loopless(
+                    model,
+                    method=loopless,
+                    reactions=cyclic_reactions,
+                )
+                run_cycle_free_flux = False
+
+            for what in ("minimum", "maximum"):
+                if len(opt_rxn_ids[what]) == 0:
+                    continue
+
+                cur_processes = min(processes, len(opt_rxn_ids[what]))
+                if cur_processes > 1:
+                    # We create and destroy a new pool here in order to set the
+                    # objective direction for all reactions. This creates a
+                    # slight overhead but seems the most clean.
+                    chunk_size = len(opt_rxn_ids[what]) // cur_processes
+                    with ProcessPool(
+                        cur_processes,
+                        initializer=_init_worker,
+                        initargs=(model, run_cycle_free_flux, what[:3]),
+                    ) as pool:
+                        for rxn_id, value in pool.imap_unordered(
+                            _fva_step, opt_rxn_ids[what], chunksize=chunk_size
+                        ):
+                            fva_result.at[rxn_id, what] = value
+                else:
+                    _init_worker(model, run_cycle_free_flux, what[:3])
+                    for rxn_id, value in map(_fva_step, opt_rxn_ids[what]):
                         fva_result.at[rxn_id, what] = value
-            else:
-                _init_worker(model, loopless, what[:3])
-                for rxn_id, value in map(_fva_step, reaction_ids):
-                    fva_result.at[rxn_id, what] = value
 
     return fva_result[["minimum", "maximum"]]
 
