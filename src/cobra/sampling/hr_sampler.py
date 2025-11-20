@@ -512,7 +512,7 @@ class HRSampler(ABC):
             a code of 1 to 3 letters denoting the validation result:
             - 'v' means feasible in bounds and equality constraints
             - 'l' means a lower bound violation
-            - 'u' means a lower bound validation
+            - 'u' means an upper bound validation
             - 'e' means and equality constraint violation
 
         Raises
