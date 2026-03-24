@@ -17,8 +17,11 @@ from .parsimonious import pfba
 from .phenotype_phase_plane import production_envelope
 from .room import add_room, room
 from .variability import (
-    find_blocked_reactions,
     find_essential_genes,
     find_essential_reactions,
     flux_variability_analysis,
+)
+from .blocked import (
+    find_blocked_reactions,
+    find_blocked_reactions_loopless_fast,
 )

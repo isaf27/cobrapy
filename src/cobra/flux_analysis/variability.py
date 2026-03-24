@@ -1,5 +1,6 @@
 """Provide variability based methods such as flux variability or gene essentiality."""
 
+import time
 import logging
 from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Union
 from warnings import warn
@@ -93,7 +94,7 @@ def flux_variability_analysis(
     model: "Model",
     reaction_list: Optional[List[Union["Reaction", str]]] = None,
     loopless: Union[Optional[str], bool] = None,
-    fraction_of_optimum: float = 1.0,
+    fraction_of_optimum: Optional[float] = 1.0,
     pfba_factor: Optional[float] = None,
     processes: Optional[int] = None,
 ) -> pd.DataFrame:
@@ -175,15 +176,15 @@ def flux_variability_analysis(
     if loopless is not None and isinstance(loopless, bool):
         warn(
             "Passing a boolean value to the `loopless` argument is deprecated. "
-            "Please pass either None, 'fastSNP' or 'cycleFreeFlux'.",
+            "Please pass either None, 'potentials', 'fastSNP' or 'cycleFreeFlux'.",
             DeprecationWarning,
             stacklevel=2,
         )
         loopless = "cycleFreeFlux" if loopless else None
 
-    if loopless not in (None, "fastSNP", "cycleFreeFlux"):
+    if loopless not in (None, "potentials", "fastSNP", "cycleFreeFlux"):
         raise ValueError(
-            "The `loopless` argument must be either None, 'fastSNP' or 'cycleFreeFlux'."
+            "The `loopless` argument must be either None, 'potentials', 'fastSNP' or 'cycleFreeFlux'."
         )
 
     if reaction_list is None:
@@ -231,32 +232,33 @@ def flux_variability_analysis(
 
     prob = model.problem
     with model:
-        # Safety check before setting up FVA.
-        model.slim_optimize(
-            error_value=None,
-            message="There is no optimal solution for the chosen objective!",
-        )
-        # Add the previous objective as a variable to the model then set it to
-        # zero. This also uses the fraction to create the lower/upper bound for
-        # the old objective.
-        # TODO: Use utility function here (fix_objective_as_constraint)?
-        if model.solver.objective.direction == "max":
-            fva_old_objective = prob.Variable(
-                "fva_old_objective",
-                lb=fraction_of_optimum * model.solver.objective.value,
+        if fraction_of_optimum is not None:
+            # Safety check before setting up FVA.
+            model.slim_optimize(
+                error_value=None,
+                message="There is no optimal solution for the chosen objective!",
             )
-        else:
-            fva_old_objective = prob.Variable(
-                "fva_old_objective",
-                ub=fraction_of_optimum * model.solver.objective.value,
+            # Add the previous objective as a variable to the model then set it to
+            # zero. This also uses the fraction to create the lower/upper bound for
+            # the old objective.
+            # TODO: Use utility function here (fix_objective_as_constraint)?
+            if model.solver.objective.direction == "max":
+                fva_old_objective = prob.Variable(
+                    "fva_old_objective",
+                    lb=fraction_of_optimum * model.solver.objective.value,
+                )
+            else:
+                fva_old_objective = prob.Variable(
+                    "fva_old_objective",
+                    ub=fraction_of_optimum * model.solver.objective.value,
+                )
+            fva_old_obj_constraint = prob.Constraint(
+                model.solver.objective.expression - fva_old_objective,
+                lb=0,
+                ub=0,
+                name="fva_old_objective_constraint",
             )
-        fva_old_obj_constraint = prob.Constraint(
-            model.solver.objective.expression - fva_old_objective,
-            lb=0,
-            ub=0,
-            name="fva_old_objective_constraint",
-        )
-        model.add_cons_vars([fva_old_objective, fva_old_obj_constraint])
+            model.add_cons_vars([fva_old_objective, fva_old_obj_constraint])
 
         if pfba_factor is not None:
             if pfba_factor < 1.0:
@@ -281,8 +283,10 @@ def flux_variability_analysis(
             if len(opt_rxn_ids["minimum"]) == 0 and len(opt_rxn_ids["maximum"]) == 0:
                 continue
 
+            start_time = time.time()
+
             run_cycle_free_flux = bool(loopless_reactions)
-            if loopless_reactions and loopless == "fastSNP":
+            if loopless_reactions and loopless != "cycleFreeFlux":
                 add_loopless(
                     model,
                     method=loopless,
@@ -313,80 +317,15 @@ def flux_variability_analysis(
                     _init_worker(model, run_cycle_free_flux, what[:3])
                     for rxn_id, value in map(_fva_step, opt_rxn_ids[what]):
                         fva_result.at[rxn_id, what] = value
+                        
+            logger.info(
+                f"Finished FVA for "
+                f"{len(opt_rxn_ids['minimum']) + len(opt_rxn_ids['maximum'])} "
+                f"reactions with loopless={loopless_reactions} "
+                f"in {time.time() - start_time:.2f} seconds."
+            )
 
     return fva_result[["minimum", "maximum"]]
-
-
-def find_blocked_reactions(
-    model: "Model",
-    reaction_list: Optional[List[Union["Reaction", str]]] = None,
-    zero_cutoff: Optional[float] = None,
-    open_exchanges: bool = False,
-    processes: Optional[int] = None,
-) -> List["Reaction"]:
-    """Find reactions that cannot carry any flux.
-
-    The question whether or not a reaction is blocked is highly dependent
-    on the current exchange reaction settings for a COBRA model. Hence an
-    argument is provided to open all exchange reactions.
-
-    Parameters
-    ----------
-    model : cobra.Model
-        The model to analyze.
-    reaction_list : list of cobra.Reaction or str, optional
-        List of reactions to consider, the default includes all model
-        reactions (default None).
-    zero_cutoff : float, optional
-        Flux value which is considered to effectively be zero. The default
-        is set to use `model.tolerance` (default None).
-    open_exchanges : bool, optional
-        Whether or not to open all exchange reactions to very high flux
-        ranges (default False).
-    processes : int, optional
-        The number of parallel processes to run. Can speed up the
-        computations if the number of reactions is large. If not explicitly
-        passed, it will be set from the global configuration singleton
-        (default None).
-
-    Returns
-    -------
-    list of cobra.Reaction
-        List with the identifiers of blocked reactions.
-
-    Notes
-    -----
-    Sink and demand reactions are left untouched. Please modify them manually.
-
-    """
-    zero_cutoff = normalize_cutoff(model, zero_cutoff)
-
-    with model:
-        if open_exchanges:
-            for reaction in model.exchanges:
-                reaction.bounds = (
-                    min(reaction.lower_bound, -1000),
-                    max(reaction.upper_bound, 1000),
-                )
-        if reaction_list is None:
-            reaction_list = model.reactions
-        # Limit the search space to reactions which have zero flux. If the
-        # reactions already carry flux in this solution,
-        # then they cannot be blocked.
-        model.slim_optimize()
-        solution = get_solution(model, reactions=reaction_list)
-        reaction_list = solution.fluxes[
-            solution.fluxes.abs() < zero_cutoff
-        ].index.tolist()
-        # Run FVA to find reactions where both the minimal and maximal flux
-        # are zero (below the cut off).
-        flux_span = flux_variability_analysis(
-            model,
-            fraction_of_optimum=0.0,
-            reaction_list=reaction_list,
-            processes=processes,
-        )
-        return flux_span[flux_span.abs().max(axis=1) < zero_cutoff].index.tolist()
 
 
 def find_essential_genes(
