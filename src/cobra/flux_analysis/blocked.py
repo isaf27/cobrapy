@@ -112,8 +112,8 @@ def find_blocked_reactions(
             solution = get_solution(model, reactions=reaction_list)
             forward_unknown = solution.fluxes[solution.fluxes < zero_cutoff].index.tolist()
             reverse_unknown = solution.fluxes[solution.fluxes > -zero_cutoff].index.tolist()
-            reaction_list = [(reaction_id, "max") for reaction_id in forward_unknown] + \
-                [(reaction_id, "min") for reaction_id in reverse_unknown]
+            reaction_list = [(reaction_id, "maximum") for reaction_id in forward_unknown] + \
+                [(reaction_id, "minimum") for reaction_id in reverse_unknown]
 
         # Run FVA to find reactions where both the minimal and maximal flux
         # are zero (below the cut off).
@@ -132,6 +132,166 @@ def find_blocked_reactions(
             flux_span["minimum"].notna() & (flux_span["minimum"] > -zero_cutoff)
         ].index.tolist()
 
+        return BlockedReactionsResult(forward_blocked, reverse_blocked)
+
+
+def _build_reactions_to_check_with_loopless(
+    model: "Model",
+    reaction_list: List[Union["Reaction", str]],
+    blocked_without_constraints: "BlockedReactionsResult",
+    zero_cutoff: float,
+) -> Tuple[List[Tuple[str, str]], List[str]]:
+    reaction_ids = [r if isinstance(r, str) else r.id for r in reaction_list]
+
+    cyclic_reactions, cyclic_directions = find_cyclic_reactions(
+        model,
+        zero_cutoff=zero_cutoff,
+    )
+    cyclic_reaction_index = {r_id: i for i, r_id in enumerate(cyclic_reactions)}
+    
+    reactions_to_check = []
+
+    non_blocked_rev = list(set(reaction_ids) - set(blocked_without_constraints.reverse_blocked))
+    for r_id in non_blocked_rev:
+        if r_id in cyclic_reaction_index:
+            c_idx = cyclic_reaction_index[r_id]
+            if cyclic_directions[c_idx][0]:
+                reactions_to_check.append((r_id, "rev"))
+
+    non_blocked_fwd = list(set(reaction_ids) - set(blocked_without_constraints.forward_blocked))
+    for r_id in non_blocked_fwd:
+        if r_id in cyclic_reaction_index:
+            c_idx = cyclic_reaction_index[r_id]
+            if cyclic_directions[c_idx][1]:
+                reactions_to_check.append((r_id, "fwd"))
+    
+    cnt_forward = 0
+    for r_id in blocked_without_constraints.forward_blocked:
+        if r_id in cyclic_reaction_index:
+            c_idx = cyclic_reaction_index[r_id]
+            if cyclic_directions[c_idx][1]:
+                cnt_forward += 1
+    cnt_reverse = 0
+    for r_id in blocked_without_constraints.reverse_blocked:
+        if r_id in cyclic_reaction_index:
+            c_idx = cyclic_reaction_index[r_id]
+            if cyclic_directions[c_idx][0]:
+                cnt_reverse += 1
+    logger.info(
+        f"blocked among cyclic: {cnt_forward}, {cnt_reverse}"
+    )
+
+    logger.info(f"{len(reactions_to_check)} reactions to check with loopless constraints.")
+
+    return reactions_to_check, cyclic_reactions
+
+
+def _find_blocked_reactions_loopless_directional(
+    model: "Model",
+    reaction_list: List[Tuple[str, str]],
+    loopless: str,
+    zero_cutoff: float,
+    flux_threshold: float,
+    cyclic_reactions: List[str],
+) -> "BlockedReactionsResult":
+    with model:
+        add_loopless(
+            model,
+            zero_cutoff,
+            method=loopless,
+            reactions=cyclic_reactions,
+            flux_threshold=flux_threshold,
+        )
+        
+        logger.info(
+            f"search with flux_threshold: {len(reaction_list)} reactions to check."
+        )
+
+        blocked_by_direction = {
+            "fwd": set(),
+            "rev": set(),
+        }
+        for rid, dir in reaction_list:
+            blocked_by_direction[dir].add(rid)
+
+        model.objective = Zero
+        coefs = {
+            model.variables[f"indicator_{dir}_{rid}"]: 1
+            for rid, dir in reaction_list
+        }
+        model.objective.set_linear_coefficients(coefs)
+        model.objective.direction = "max"
+
+        is_nonzero_num = 0
+        while is_nonzero_num < len(reaction_list):
+            model.slim_optimize()
+
+            remove_coef = {}
+            for rid, dir in reaction_list:
+                if rid in blocked_by_direction[dir]:
+                    rxn = model.reactions.get_by_id(rid)
+                    if (dir == "fwd" and rxn.forward_variable.primal >= flux_threshold * 0.999) or \
+                       (dir == "rev" and rxn.reverse_variable.primal >= flux_threshold * 0.999):
+                        blocked_by_direction[dir].remove(rid)
+                        remove_coef[model.variables[f"indicator_{dir}_{rid}"]] = 0
+
+            is_nonzero_num += len(remove_coef)
+
+            if len(remove_coef) == 0:
+                logger.info(
+                    f"search with flux_threshold: "
+                    f"{len(reaction_list) - is_nonzero_num} are blocked."
+                )
+                break
+
+            model.objective.set_linear_coefficients(remove_coef)
+            
+            logger.info(
+                f"search with flux_threshold: found {len(remove_coef)} non-blocked reactions, "
+                f"{len(reaction_list) - is_nonzero_num} remain to check."
+            )
+
+        return BlockedReactionsResult(
+            forward_blocked=list(blocked_by_direction["fwd"]),
+            reverse_blocked=list(blocked_by_direction["rev"]),
+        )
+
+        
+def _find_blocked_reactions_loopless(
+    model: "Model",
+    reaction_list: List[Tuple[str, str]],
+    loopless: str,
+    zero_cutoff: float,
+    processes: Optional[int],
+    cyclic_reactions: List[str],
+) -> "BlockedReactionsResult":
+    with model:
+        add_loopless(
+            model,
+            zero_cutoff,
+            method=loopless,
+            reactions=cyclic_reactions,
+        )
+        
+        flux_reactions_list = [
+            (r_id, "max" if dir == "fwd" else "min")
+            for r_id, dir in reaction_list
+        ]
+
+        flux_span = flux_variability_analysis(
+            model,
+            reaction_list=flux_reactions_list,
+            fraction_of_optimum=None,
+            processes=processes,
+        )
+
+        forward_blocked = flux_span[
+            flux_span["maximum"].notna() & (flux_span["maximum"] < zero_cutoff)
+        ].index.tolist()
+        reverse_blocked = flux_span[
+            flux_span["minimum"].notna() & (flux_span["minimum"] > -zero_cutoff)
+        ].index.tolist()
+        
         return BlockedReactionsResult(forward_blocked, reverse_blocked)
 
 
@@ -156,7 +316,7 @@ def find_blocked_reactions_loopless(
                     max(reaction.upper_bound, max_bound),
                 )
 
-        blocked_no_constraints = find_blocked_reactions(
+        blocked_without_constraints = find_blocked_reactions(
             model,
             reaction_list=reaction_list,
             zero_cutoff=zero_cutoff,
@@ -167,121 +327,39 @@ def find_blocked_reactions_loopless(
         if reaction_list is None:
             reaction_list = model.reactions
 
-        reaction_to_index = {r.id: i for i, r in enumerate(reaction_list)}
-        is_nonzero_fwd = [True] * len(reaction_list)
-        is_nonzero_rev = [True] * len(reaction_list)
-        for rid in blocked_no_constraints.forward_blocked:
-            is_nonzero_fwd[reaction_to_index[rid]] = False
-        for rid in blocked_no_constraints.reverse_blocked:
-            is_nonzero_rev[reaction_to_index[rid]] = False
-
-        reactions_to_check = []
-        cyclic_reactions, cyclic_directions = find_cyclic_reactions(model, zero_cutoff=zero_cutoff)
-        cyclic_reaction_index = {r_id: i for i, r_id in enumerate(cyclic_reactions)}
-        for r in reaction_list:
-            if r.id in cyclic_reaction_index:
-                cid = cyclic_reaction_index[r.id]
-                i = reaction_to_index[r.id]
-                if cyclic_directions[cid][0] and is_nonzero_rev[i]:
-                    is_nonzero_rev[i] = False
-                    reactions_to_check.append((i, "rev"))
-                if cyclic_directions[cid][1] and is_nonzero_fwd[i]:
-                    is_nonzero_fwd[i] = False
-                    reactions_to_check.append((i, "fwd"))
-
-        with model:
-            reactions_copy = [model.reactions.get_by_id(r.id) for r in reaction_list]
-
-            add_loopless(
-                model,
-                zero_cutoff,
-                method=loopless,
-                reactions=cyclic_reactions,
-                flux_threshold=flux_threshold,
-            )
-            
-            model.objective = Zero
-            coefs = {
-                model.variables[f"indicator_{dir}_{reaction_list[i].id}"]: 1
-                for i, dir in reactions_to_check
-            }
-            model.objective.set_linear_coefficients(coefs)
-            model.objective.direction = "max"
-
-            is_nonzero_num = 0
-            while is_nonzero_num < len(reactions_to_check):
-                model.slim_optimize()
-
-                remove_coef = {}
-                for i, dir in reactions_to_check:
-                    rxn = reactions_copy[i]
-                    if dir == "fwd":
-                        if not is_nonzero_fwd[i] and rxn.forward_variable.primal >= flux_threshold * 0.999:
-                            is_nonzero_fwd[i] = True
-                            remove_coef[model.variables[f"indicator_{dir}_{rxn.id}"]] = 0
-                    elif dir == "rev":
-                        if not is_nonzero_rev[i] and rxn.reverse_variable.primal >= flux_threshold * 0.999:
-                            is_nonzero_rev[i] = True
-                            remove_coef[model.variables[f"indicator_{dir}_{rxn.id}"]] = 0
-
-                is_nonzero_num += len(remove_coef)
-
-                if len(remove_coef) == 0:
-                    logger.info(
-                        f"pre-search: finished for blocked reactions. "
-                        f"{len(reactions_to_check) - is_nonzero_num} reactions remain to check in post-searching."
-                    )
-                    break
-
-                model.objective.set_linear_coefficients(remove_coef)
-                
-                logger.info(
-                    f"pre-search: found {len(remove_coef)} non-blocked reactions, "
-                    f"{len(reactions_to_check) - is_nonzero_num} remaining to check."
-                )
-
-        add_loopless(
+        reactions_to_check, cyclic_reactions = _build_reactions_to_check_with_loopless(
             model,
+            reaction_list,
+            blocked_without_constraints,
             zero_cutoff,
-            method=loopless,
-            reactions=cyclic_reactions,
         )
 
-        flux_reactions_list = []
-        for i, dir in reactions_to_check:
-            if dir == "fwd":
-                if not is_nonzero_fwd[i]:
-                    flux_reactions_list.append((reaction_list[i], "max"))
-            elif dir == "rev":
-                if not is_nonzero_rev[i]:
-                    flux_reactions_list.append((reaction_list[i], "min"))
-
-        flux_span = flux_variability_analysis(
+        blocked_with_flux_threshold = _find_blocked_reactions_loopless_directional(
             model,
-            reaction_list=flux_reactions_list,
-            fraction_of_optimum=None,
-            processes=processes,
+            reactions_to_check,
+            loopless,
+            zero_cutoff,
+            flux_threshold,
+            cyclic_reactions,
+        )
+        
+        reactions_to_check = [(r_id, "fwd") for r_id in blocked_with_flux_threshold.forward_blocked] + \
+            [(r_id, "rev") for r_id in blocked_with_flux_threshold.reverse_blocked]
+            
+        blocked_with_loopless = _find_blocked_reactions_loopless(
+            model,
+            reactions_to_check,
+            loopless,
+            zero_cutoff,
+            processes,
+            cyclic_reactions,
+        )
+        
+        logger.info(
+            f"blocked among cyclic: {len(blocked_with_loopless.forward_blocked)}, {len(blocked_with_loopless.reverse_blocked)}"
         )
 
-        check_forward_blocked = set(
-            flux_span[
-                flux_span["maximum"].notna() & (flux_span["maximum"] < zero_cutoff)
-            ].index.tolist()
+        return BlockedReactionsResult(
+            forward_blocked=blocked_without_constraints.forward_blocked + blocked_with_loopless.forward_blocked,
+            reverse_blocked=blocked_without_constraints.reverse_blocked + blocked_with_loopless.reverse_blocked
         )
-        check_reverse_blocked = set(
-            flux_span[
-                flux_span["minimum"].notna() & (flux_span["minimum"] > -zero_cutoff)
-            ].index.tolist()
-        )
-        for i, dir in reactions_to_check:
-            if dir == "fwd":
-                if reaction_list[i].id not in check_forward_blocked:
-                    is_nonzero_fwd[i] = True
-            elif dir == "rev":
-                if reaction_list[i].id not in check_reverse_blocked:
-                    is_nonzero_rev[i] = True
-
-        forward_blocked = [r.id for i, r in enumerate(reaction_list) if not is_nonzero_fwd[i]]
-        reverse_blocked = [r.id for i, r in enumerate(reaction_list) if not is_nonzero_rev[i]]
-
-        return BlockedReactionsResult(forward_blocked, reverse_blocked)

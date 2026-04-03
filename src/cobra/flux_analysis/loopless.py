@@ -367,6 +367,7 @@ def add_loopless(
             integrality_tolerance = model.solver.configuration.tolerances.integrality
         except AttributeError:
             integrality_tolerance = None
+        print(f"Integrality tolerance: {integrality_tolerance}, Max bound: {max_bound}, Flux threshold: {flux_threshold}")
         if integrality_tolerance is None or max_bound * integrality_tolerance >= flux_threshold * 0.5:
             warn(
                 "Loopless constraints may not work properly "
