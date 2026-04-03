@@ -97,17 +97,24 @@ def find_blocked_reactions(
                     min(reaction.lower_bound, -max_bound),
                     max(reaction.upper_bound, max_bound),
                 )
+
         if reaction_list is None:
             reaction_list = model.reactions
+        else:
+            reaction_list = model.reactions.get_by_any(reaction_list)
+
         if loopless is None:
-            # Limit the search space to reactions which have zero flux. If the
-            # reactions already carry flux in this solution,
-            # then they cannot be blocked.
+            # Limit the search space to reactions which have zero flux.
+            # If the reactions already carry flux in this solution,
+            # the active direction is known to be feasible and only
+            # the opposite direction needs to be checked.
             model.slim_optimize()
             solution = get_solution(model, reactions=reaction_list)
-            reaction_list = solution.fluxes[
-                solution.fluxes.abs() < zero_cutoff
-            ].index.tolist()
+            forward_unknown = solution.fluxes[solution.fluxes < zero_cutoff].index.tolist()
+            reverse_unknown = solution.fluxes[solution.fluxes > -zero_cutoff].index.tolist()
+            reaction_list = [(reaction_id, "max") for reaction_id in forward_unknown] + \
+                [(reaction_id, "min") for reaction_id in reverse_unknown]
+
         # Run FVA to find reactions where both the minimal and maximal flux
         # are zero (below the cut off).
         flux_span = flux_variability_analysis(
@@ -117,16 +124,18 @@ def find_blocked_reactions(
             fraction_of_optimum=None,
             processes=processes,
         )
+
         forward_blocked = flux_span[
-            flux_span["maximum"] < zero_cutoff
+            flux_span["maximum"].notna() & (flux_span["maximum"] < zero_cutoff)
         ].index.tolist()
         reverse_blocked = flux_span[
-            flux_span["minimum"] > -zero_cutoff
+            flux_span["minimum"].notna() & (flux_span["minimum"] > -zero_cutoff)
         ].index.tolist()
+
         return BlockedReactionsResult(forward_blocked, reverse_blocked)
 
 
-def find_blocked_reactions_loopless_fast(
+def find_blocked_reactions_loopless(
     model: "Model",
     reaction_list: Optional[List[Union["Reaction", str]]] = None,
     loopless: str = 'potentials',
@@ -147,7 +156,7 @@ def find_blocked_reactions_loopless_fast(
                     max(reaction.upper_bound, max_bound),
                 )
 
-        blocked = find_blocked_reactions(
+        blocked_no_constraints = find_blocked_reactions(
             model,
             reaction_list=reaction_list,
             zero_cutoff=zero_cutoff,
@@ -161,13 +170,13 @@ def find_blocked_reactions_loopless_fast(
         reaction_to_index = {r.id: i for i, r in enumerate(reaction_list)}
         is_nonzero_fwd = [True] * len(reaction_list)
         is_nonzero_rev = [True] * len(reaction_list)
-        for rid in blocked.forward_blocked:
+        for rid in blocked_no_constraints.forward_blocked:
             is_nonzero_fwd[reaction_to_index[rid]] = False
-        for rid in blocked.reverse_blocked:
+        for rid in blocked_no_constraints.reverse_blocked:
             is_nonzero_rev[reaction_to_index[rid]] = False
 
         reactions_to_check = []
-        cyclic_reactions, cyclic_directions = find_cyclic_reactions(model)
+        cyclic_reactions, cyclic_directions = find_cyclic_reactions(model, zero_cutoff=zero_cutoff)
         cyclic_reaction_index = {r_id: i for i, r_id in enumerate(cyclic_reactions)}
         for r in reaction_list:
             if r.id in cyclic_reaction_index:
@@ -219,7 +228,7 @@ def find_blocked_reactions_loopless_fast(
 
                 if len(remove_coef) == 0:
                     logger.info(
-                        f"Finished pre-searching for blocked reactions. "
+                        f"pre-search: finished for blocked reactions. "
                         f"{len(reactions_to_check) - is_nonzero_num} reactions remain to check in post-searching."
                     )
                     break
@@ -227,9 +236,50 @@ def find_blocked_reactions_loopless_fast(
                 model.objective.set_linear_coefficients(remove_coef)
                 
                 logger.info(
-                    f"Pre-searching: found {len(remove_coef)} non-blocked reactions, "
+                    f"pre-search: found {len(remove_coef)} non-blocked reactions, "
                     f"{len(reactions_to_check) - is_nonzero_num} remaining to check."
                 )
+
+        add_loopless(
+            model,
+            zero_cutoff,
+            method=loopless,
+            reactions=cyclic_reactions,
+        )
+
+        flux_reactions_list = []
+        for i, dir in reactions_to_check:
+            if dir == "fwd":
+                if not is_nonzero_fwd[i]:
+                    flux_reactions_list.append((reaction_list[i], "max"))
+            elif dir == "rev":
+                if not is_nonzero_rev[i]:
+                    flux_reactions_list.append((reaction_list[i], "min"))
+
+        flux_span = flux_variability_analysis(
+            model,
+            reaction_list=flux_reactions_list,
+            fraction_of_optimum=None,
+            processes=processes,
+        )
+
+        check_forward_blocked = set(
+            flux_span[
+                flux_span["maximum"].notna() & (flux_span["maximum"] < zero_cutoff)
+            ].index.tolist()
+        )
+        check_reverse_blocked = set(
+            flux_span[
+                flux_span["minimum"].notna() & (flux_span["minimum"] > -zero_cutoff)
+            ].index.tolist()
+        )
+        for i, dir in reactions_to_check:
+            if dir == "fwd":
+                if reaction_list[i].id not in check_forward_blocked:
+                    is_nonzero_fwd[i] = True
+            elif dir == "rev":
+                if reaction_list[i].id not in check_reverse_blocked:
+                    is_nonzero_rev[i] = True
 
         forward_blocked = [r.id for i, r in enumerate(reaction_list) if not is_nonzero_fwd[i]]
         reverse_blocked = [r.id for i, r in enumerate(reaction_list) if not is_nonzero_rev[i]]

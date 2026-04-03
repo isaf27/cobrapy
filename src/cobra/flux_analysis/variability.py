@@ -92,7 +92,7 @@ def _fva_step(reaction_id: str) -> Tuple[str, float]:
 
 def flux_variability_analysis(
     model: "Model",
-    reaction_list: Optional[List[Union["Reaction", str]]] = None,
+    reaction_list: Optional[List[Union["Reaction", str, Tuple[Union["Reaction", str], str]]]] = None,
     loopless: Union[Optional[str], bool] = None,
     fraction_of_optimum: Optional[float] = 1.0,
     pfba_factor: Optional[float] = None,
@@ -104,7 +104,7 @@ def flux_variability_analysis(
     ----------
     model : cobra.Model
         The model for which to run the analysis. It will *not* be modified.
-    reaction_list : list of cobra.Reaction or str, optional
+    reaction_list : list of cobra.Reaction or str or tuple of (cobra.Reaction or str, str), optional
         The reactions for which to obtain min/max fluxes. If None will use
         all reactions in the model (default None).
     loopless : str, "fastSNP" or "cycleFreeFlux", optional
@@ -189,8 +189,40 @@ def flux_variability_analysis(
 
     if reaction_list is None:
         reaction_ids = [r.id for r in model.reactions]
+        requested_by_direction = {
+            "minimum": set(reaction_ids),
+            "maximum": set(reaction_ids),
+        }
     else:
-        reaction_ids = [r.id for r in model.reactions.get_by_any(reaction_list)]
+        requested_by_direction = {"minimum": set(), "maximum": set()}
+        reaction_ids_set = set()
+
+        def _add_reaction_request(
+            reaction: Union["Reaction", str], directions: Tuple[str, ...]
+        ) -> None:
+            rxn = model.reactions.get_by_any([reaction])[0]
+            reaction_ids_set.add(rxn.id)
+            for direction in directions:
+                requested_by_direction[direction].add(rxn.id)
+
+        for reaction_entry in reaction_list:
+            if isinstance(reaction_entry, tuple):
+                reaction, direction = reaction_entry
+                direction = direction.lower()
+                if direction == "min":
+                    direction = "minimum"
+                elif direction == "max":
+                    direction = "maximum"
+                if direction not in ("minimum", "maximum"):
+                    raise ValueError(
+                        "Directional reaction requests must use 'min', 'max', "
+                        "'minimum' or 'maximum'."
+                    )
+                _add_reaction_request(reaction, (direction,))
+            else:
+                _add_reaction_request(reaction_entry, ("minimum", "maximum"))
+
+        reaction_ids = list(reaction_ids_set)
 
     if processes is None:
         processes = configuration.processes
@@ -200,8 +232,8 @@ def flux_variability_analysis(
 
     fva_result = pd.DataFrame(
         {
-            "minimum": np.zeros(num_reactions, dtype=float),
-            "maximum": np.zeros(num_reactions, dtype=float),
+            "minimum": np.full(num_reactions, np.nan, dtype=float),
+            "maximum": np.full(num_reactions, np.nan, dtype=float),
         },
         index=reaction_ids,
     )
@@ -222,13 +254,17 @@ def flux_variability_analysis(
         for r_id in reaction_ids:
             i = cyclic_reaction_index.get(r_id)
             for loc, dir in enumerate(("minimum", "maximum")):
+                if r_id not in requested_by_direction[dir]:
+                    continue
                 if i is not None and cyclic_directions[i][loc]:
                     reaction_ids_by_type[1][dir].append(r_id)
                 else:
                     reaction_ids_by_type[0][dir].append(r_id)
     else:
-        reaction_ids_by_type[0]["minimum"] = reaction_ids
-        reaction_ids_by_type[0]["maximum"] = reaction_ids
+        for dir in ("minimum", "maximum"):
+            reaction_ids_by_type[0][dir] = [
+                r_id for r_id in reaction_ids if r_id in requested_by_direction[dir]
+            ]
 
     prob = model.problem
     with model:
@@ -317,7 +353,7 @@ def flux_variability_analysis(
                     _init_worker(model, run_cycle_free_flux, what[:3])
                     for rxn_id, value in map(_fva_step, opt_rxn_ids[what]):
                         fva_result.at[rxn_id, what] = value
-                        
+        
             logger.info(
                 f"Finished FVA for "
                 f"{len(opt_rxn_ids['minimum']) + len(opt_rxn_ids['maximum'])} "

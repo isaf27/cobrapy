@@ -23,5 +23,5 @@ from .variability import (
 )
 from .blocked import (
     find_blocked_reactions,
-    find_blocked_reactions_loopless_fast,
+    find_blocked_reactions_loopless,
 )
