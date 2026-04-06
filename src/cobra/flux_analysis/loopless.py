@@ -1,5 +1,6 @@
 """Provide functions to remove thermodynamically infeasible loops."""
 
+import logging
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 from warnings import warn
 
@@ -15,6 +16,9 @@ from .helpers import normalize_cutoff
 
 if TYPE_CHECKING:
     from cobra import Model, Reaction, Solution
+
+
+logger = logging.getLogger(__name__)
 
 
 def _add_loopless_with_nullspace(
@@ -367,7 +371,13 @@ def add_loopless(
             integrality_tolerance = model.solver.configuration.tolerances.integrality
         except AttributeError:
             integrality_tolerance = None
-        print(f"Integrality tolerance: {integrality_tolerance}, Max bound: {max_bound}, Flux threshold: {flux_threshold}")
+
+        logger.info(
+            f"Integrality tolerance: {integrality_tolerance}, "
+            f"Max bound: {max_bound}, "
+            f"Flux threshold: {flux_threshold}"
+        )
+
         if integrality_tolerance is None or max_bound * integrality_tolerance >= flux_threshold * 0.5:
             warn(
                 "Loopless constraints may not work properly "
