@@ -87,7 +87,7 @@ def test_flux_variability(
 
 
 def test_flux_variability_directional_reactions(model: Model) -> None:
-    """Test FVA with directional reactions passed."""
+    """Test FVA with directional reactions."""
     full = flux_variability_analysis(
         model,
         reaction_list=["FRD7", "SUCDi", "FUM"],

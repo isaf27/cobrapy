@@ -24,7 +24,7 @@ def _add_loopless_with_nullspace(
     max_bound: float,
     zero_cutoff: float,
 ):
-    """TODO"""
+    """Add a nullspace-based loopless constraints."""
     prob = model.problem
 
     # Add indicator variables and new constraints
@@ -76,7 +76,7 @@ def _add_loopless_with_nullspace_directional(
     max_bound: float,
     zero_cutoff: float,
 ):
-    """TODO"""
+    """Add directional nullspace-based loopless constraints."""
     prob = model.problem
 
     # Add indicator variables and new constraints
@@ -163,7 +163,7 @@ def _add_loopless_with_potentials(
     max_bound: float,
     zero_cutoff: float,
 ):
-    """TODO"""
+    """Add loopless constraints using metabolite potential variables."""
     prob = model.problem
     
     # Add indicator variables and new constraints
@@ -211,7 +211,7 @@ def _add_loopless_with_potentials_directional(
     max_bound: float,
     zero_cutoff: float,
 ):
-    """TODO"""
+    """Add directional loopless constraints using metabolite potential variables."""
     prob = model.problem
 
     # Add potential and indicator variables
@@ -305,9 +305,12 @@ def add_loopless(
     It adds variables and constraints to a model which will disallow flux
     distributions with loops. This function *will* modify your model.
 
-    The used formulation is described in [1]_. If `method` is set to
-    "fastSNP", it uses a faster implementation based on the Fast-SNP
-    algorithm [2]_.
+    If `method` is set to "original" or "fastSNP" the used formulation
+    is described in [1]_. If `method` is set to "fastSNP", it uses a
+    faster implementation based on the Fast-SNP algorithm [2]_.
+
+    If `method` is set to "potentials", it uses metabolite potential
+    variables instead of nullspace-based constraints.
 
     In most cases you probably want to use the much faster
     `loopless_solution`. May be used in cases where you want to add complex
@@ -323,14 +326,32 @@ def add_loopless(
         Cutoff used for null space. Coefficients with an absolute value
         smaller than `zero_cutoff` are considered to be zero. The default
         uses the `model.tolerance` (default None).
-    method : str, "original" or "fastSNP", optional
+    method : str, "original", "fastSNP", or "potentials", optional
         The method to use for finding the null space. The "original" method
         uses the original method from [1]_, while "fastSNP" uses a faster
-        implementation based on the FastSNP algorithm. The "fastSNP" method
-        is much faster and should be used in most cases.
+        implementation based on the FastSNP algorithm. The "potentials"
+        method adds constraints based on metabolite potential variables.
+        The "fastSNP" and "potentials" methods are much faster and should
+        be used. These two methods have approximately the same speed and
+        can be faster or slower for depending on models and optimization
+        problems.
     reactions : list of str, optional
         The list of reaction IDs to constrain. All cycles within these
         reactions will be removed. If `None`, all reactions will be constrained.
+    flux_threshold : float, optional
+        Minimum flux required when a directional indicator variable is active.
+        If provided, separate forward and reverse indicator variables are
+        added for each constrained reaction. This is intended for analyses
+        that need to distinguish feasible loopless directions.
+
+    Notes
+    -----
+    When `flux_threshold` is provided, the directional formulation strongly
+    relies on binary indicator variables. If the product of the largest model
+    bound and the solver integrality tolerance is close to `flux_threshold`,
+    numerical tolerances can make inactive directions appear feasible.
+    Increasing `flux_threshold`, lowering the solver integrality tolerance,
+    or using a different MILP solver can reduce this risk.
 
     References
     ----------
