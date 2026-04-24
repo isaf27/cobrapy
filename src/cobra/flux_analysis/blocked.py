@@ -3,6 +3,7 @@
 import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
+import optlang
 from optlang.symbolics import Zero
 
 from ..core import Configuration, get_solution
@@ -353,6 +354,26 @@ def _find_blocked_reactions_loopless(
         return BlockedReactionsResult(forward_blocked, reverse_blocked)
 
 
+def _set_mipgap(model: "Model", mipgap: float) -> None:
+    """Set MIP gap for the solver."""
+    old_mipgap = None
+    if model.problem == optlang.cplex_interface:
+        old_mipgap = model.solver.problem.parameters.mip.tolerances.mipgap.get()
+        model.solver.problem.parameters.mip.tolerances.mipgap.set(mipgap)
+    elif model.problem == optlang.gurobi_interface:
+        old_mipgap = model.solver.problem.Params.MIPGap
+        model.solver.problem.Params.MIPGap = mipgap
+
+    def reset_mipgap():
+        print(old_mipgap)
+        if model.problem == optlang.cplex_interface:
+            model.solver.problem.parameters.mip.tolerances.mipgap.set(old_mipgap)
+        elif model.problem == optlang.gurobi_interface:
+            model.solver.problem.Params.MIPGap = old_mipgap
+
+    return reset_mipgap
+
+
 def find_blocked_reactions_loopless(
     model: "Model",
     reaction_list: Optional[List[Union["Reaction", str]]] = None,
@@ -420,6 +441,8 @@ def find_blocked_reactions_loopless(
 
     zero_cutoff = normalize_cutoff(model, zero_cutoff)
 
+    reset_mipgap_cb = _set_mipgap(model, mipgap=1.0)
+
     with model:
         max_bound = max(
             1000.0, max(max(abs(b) for b in r.bounds) for r in model.reactions)
@@ -484,6 +507,8 @@ def find_blocked_reactions_loopless(
             open_exchanges=open_exchanges,
             processes=processes,
         )
+
+        reset_mipgap_cb()
 
         return BlockedReactionsResult(
             forward_blocked=blocked_without_constraints.forward_blocked
