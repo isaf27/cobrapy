@@ -9,7 +9,6 @@ import pytest
 
 from cobra import Model
 from cobra.exceptions import Infeasible
-from cobra.flux_analysis import find_blocked_reactions
 from cobra.flux_analysis.variability import (
     find_essential_genes,
     find_essential_reactions,
@@ -60,7 +59,7 @@ def test_pfba_flux_variability(
     assert comparison["maximum"].all()
 
 
-@pytest.mark.parametrize("loopless", ["fastSNP", "cycleFreeFlux"])
+@pytest.mark.parametrize("loopless", ["fastSNP", "potentials", "cycleFreeFlux"])
 def test_loopless_pfba_fva(model: Model, loopless: str) -> None:
     """Test loopless FVA using pFBA."""
     loop_reactions = [model.reactions.get_by_id(rid) for rid in ("FRD7", "SUCDi")]
@@ -123,7 +122,7 @@ def test_parallel_flux_variability(
 
 
 # Loopless FVA
-@pytest.mark.parametrize("loopless", ["fastSNP", "cycleFreeFlux"])
+@pytest.mark.parametrize("loopless", ["fastSNP", "potentials", "cycleFreeFlux"])
 def test_flux_variability_loopless_benchmark(
     model: Model, benchmark: Callable, all_solvers: List[str], loopless: str
 ) -> None:
@@ -137,7 +136,7 @@ def test_flux_variability_loopless_benchmark(
     )
 
 
-@pytest.mark.parametrize("loopless", ["fastSNP", "cycleFreeFlux"])
+@pytest.mark.parametrize("loopless", ["fastSNP", "potentials", "cycleFreeFlux"])
 def test_flux_variability_loopless(
     model: Model, all_solvers: List[str], loopless: str
 ) -> None:
@@ -155,7 +154,7 @@ def test_flux_variability_loopless(
     assert np.allclose(fva_loopless["maximum"], fva_loopless["minimum"])
 
 
-# Internals (essentiality, blocked reactions)
+# Internals (essentiality)
 def test_fva_data_frame(model: Model) -> None:
     """Test DataFrame obtained from FVA."""
     df = flux_variability_analysis(model)
@@ -180,12 +179,6 @@ def test_fva_minimization(model: Model) -> None:
     assert solution.at["EX_glc__D_e", "maximum"] == -9.5
 
 
-def test_find_blocked_reactions_solver_none(model: Model) -> None:
-    """Test find_blocked_reactions() [no specific solver]."""
-    result = find_blocked_reactions(model, model.reactions[40:46])
-    assert result == ["FRUpts2"]
-
-
 def test_essential_genes(model: Model) -> None:
     """Test find_essential_genes()."""
     essential_genes = {
@@ -202,7 +195,7 @@ def test_essential_genes(model: Model) -> None:
 
 
 def test_essential_reactions(model: Model) -> None:
-    """Test find_blocked_reactions()."""
+    """Test find_essential_reactions()."""
     essential_reactions = {
         "GLNS",
         "Biomass_Ecoli_core",
@@ -225,16 +218,3 @@ def test_essential_reactions(model: Model) -> None:
     }
     observed_essential_reactions = {r.id for r in find_essential_reactions(model)}
     assert observed_essential_reactions == essential_reactions
-
-
-def test_find_blocked_reactions(model: Model, all_solvers: List[str]) -> None:
-    """Test find_blocked_reactions()."""
-    model.solver = all_solvers
-    result = find_blocked_reactions(model, model.reactions[40:46])
-    assert result == ["FRUpts2"]
-
-    result = find_blocked_reactions(model, model.reactions[42:48])
-    assert set(result) == {"FUMt2_2", "FRUpts2"}
-
-    result = find_blocked_reactions(model, model.reactions[30:50], open_exchanges=True)
-    assert result == []

@@ -66,12 +66,12 @@ def find_blocked_reactions(
     reaction_list : list of cobra.Reaction or str, optional
         List of reactions to consider, the default includes all model
         reactions (default None).
-    loopless : str, "fastSNP", "potentials" or "cycleFreeFlux", optional
+    loopless : str, "fastSNP" or "potentials", optional
         If set, only loopless flux distributions are considered when checking
         whether reactions can carry flux. The value is passed to
         :func:`flux_variability_analysis` as its loopless method. Supported
-        values are ``"fastSNP"``, ``"potentials"``, and ``"cycleFreeFlux"``
-        (default None). See :func:`flux_variability_analysis` for more details.
+        values are ``"fastSNP"`` and ``"potentials"`` (default None).
+        See :func:`flux_variability_analysis` for more details.
     zero_cutoff : float, optional
         Flux value which is considered to effectively be zero. The default
         is set to use `model.tolerance` (default None).
@@ -97,6 +97,11 @@ def find_blocked_reactions(
     Sink and demand reactions are left untouched. Please modify them manually.
 
     """
+    if loopless not in (None, "potentials", "fastSNP"):
+        raise ValueError(
+            "The `loopless` argument must be either None, 'potentials', 'fastSNP'."
+        )
+
     zero_cutoff = normalize_cutoff(model, zero_cutoff)
 
     with model:
@@ -375,7 +380,7 @@ def find_blocked_reactions_loopless(
     reaction_list : list of cobra.Reaction or str, optional
         List of reactions to consider, the default includes all model
         reactions (default None).
-    loopless : str, "potentials", "fastSNP" or "original", optional
+    loopless : str, "potentials" or "fastSNP"
         The loopless formulation passed to :func:`add_loopless`. The default
         uses metabolite potential variables (default "potentials").
     zero_cutoff : float, optional
@@ -408,6 +413,11 @@ def find_blocked_reactions_loopless(
     Sink and demand reactions are left untouched. Please modify them manually.
 
     """
+    if loopless not in ("potentials", "fastSNP"):
+        raise ValueError(
+            "The `loopless` argument must be either 'potentials' or 'fastSNP'."
+        )
+
     zero_cutoff = normalize_cutoff(model, zero_cutoff)
 
     with model:
