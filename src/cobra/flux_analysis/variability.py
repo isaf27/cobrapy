@@ -104,9 +104,12 @@ def flux_variability_analysis(
     model : cobra.Model
         The model for which to run the analysis. It will *not* be modified.
     reaction_list : list of cobra.Reaction or str or tuple of (cobra.Reaction or str, str), optional
-        The reactions for which to obtain min/max fluxes. If None will use
-        all reactions in the model (default None).
-    loopless : str, "fastSNP" or "cycleFreeFlux", optional
+        The reactions for which to obtain flux bounds. Entries can be
+        reactions, reaction IDs, or ``(reaction, direction)`` tuples. Direction
+        can be ``"minimum"``, ``"maximum"``, ``"min"``, or ``"max"``. If a
+        direction is given, only that bound is computed for the reaction. If
+        ``None``, all reactions and both bounds are used (default None).
+    loopless : str, "fastSNP", "potentials" or "cycleFreeFlux", optional
         If this value is set, only loopless solutions will be returned.
         Boolean values are deprecated. Provided value means the algorithm
         to constrain the model to loopless solutions.
@@ -115,7 +118,8 @@ def flux_variability_analysis(
         Must be <= 1.0. Requires that the objective value is at least the
         fraction times maximum objective value. A value of 0.85 for instance
         means that the objective has to be at least at 85% percent of its
-        maximum (default 1.0).
+        maximum. If set to ``None``, the original objective is not constrained
+        (default 1.0).
     pfba_factor : float, optional
         Add an additional constraint to the model that requires the total sum
         of absolute fluxes must not be larger than this value times the
@@ -136,6 +140,7 @@ def flux_variability_analysis(
         A data frame with reaction identifiers as the index and two columns:
         - maximum: indicating the highest possible flux
         - minimum: indicating the lowest possible flux
+        Directional reaction requests leave unrequested bounds as ``NaN``.
 
     Notes
     -----
@@ -148,9 +153,11 @@ def flux_variability_analysis(
     Using the loopless option will lead to a significant increase in
     computation time (about a factor of 100 for large models).
 
-    If `loopless` is set to "fastSNP", the optimal loopless flux bounds will be
-    found by adding the loopless constraints to the model using efficient
-    Fast-SNP algorithm (see [2]_).
+    If `loopless` is set to "potentials" or "fastSNP", the optimal loopless
+    flux bounds will be found by adding loopless constraints to the model.
+    The "fastSNP" method uses the efficient Fast-SNP algorithm (see [2]_),
+    while "potentials" uses metabolite potential variables. See `add_loopless`
+    for details of these loopless constraints formulations.
 
     If `loopless` is set to "cycleFreeFlux", the loops removal algorithm will be
     used (see [3]_). Note: this algorithm does not guarantee to find optimal bounds.
