@@ -9,12 +9,11 @@ import numpy as np
 import pandas as pd
 from optlang.symbolics import Zero
 
-from ..core import Configuration, get_solution
+from ..core import Configuration
 from ..util import ProcessPool
 from ..util import solver as sutil
 from .deletion import single_gene_deletion, single_reaction_deletion
 from .find_cyclic_reactions import find_cyclic_reactions
-from .helpers import normalize_cutoff
 from .loopless import add_loopless, loopless_fva_iter
 from .parsimonious import add_pfba
 
@@ -319,8 +318,6 @@ def flux_variability_analysis(
             if len(opt_rxn_ids["minimum"]) == 0 and len(opt_rxn_ids["maximum"]) == 0:
                 continue
 
-            start_time = time.time()
-
             run_cycle_free_flux = bool(loopless_reactions)
             if loopless_reactions and loopless != "cycleFreeFlux":
                 add_loopless(
@@ -353,12 +350,11 @@ def flux_variability_analysis(
                     _init_worker(model, run_cycle_free_flux, what[:3])
                     for rxn_id, value in map(_fva_step, opt_rxn_ids[what]):
                         fva_result.at[rxn_id, what] = value
-        
+
             logger.info(
-                f"Finished FVA for "
+                "Finished FVA for "
                 f"{len(opt_rxn_ids['minimum']) + len(opt_rxn_ids['maximum'])} "
-                f"reactions with loopless={loopless_reactions} "
-                f"in {time.time() - start_time:.2f} seconds."
+                f"reactions with loopless={loopless_reactions}."
             )
 
     return fva_result[["minimum", "maximum"]]

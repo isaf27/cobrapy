@@ -28,6 +28,7 @@ def _add_loopless_with_nullspace(
     max_bound: float,
     zero_cutoff: float,
 ):
+    """TODO"""
     prob = model.problem
 
     # Add indicator variables and new constraints
@@ -79,6 +80,7 @@ def _add_loopless_with_nullspace_directional(
     max_bound: float,
     zero_cutoff: float,
 ):
+    """TODO"""
     prob = model.problem
 
     # Add indicator variables and new constraints
@@ -86,62 +88,62 @@ def _add_loopless_with_nullspace_directional(
     for i, ridx in enumerate(reactions_to_constrain):
         rxn = model.reactions[ridx]
 
-        indicator_fwd = prob.Variable(f"indicator_fwd_{rxn.id}", type="binary")
-        indicator_rev = prob.Variable(f"indicator_rev_{rxn.id}", type="binary")
+        indicator_maximum = prob.Variable(f"indicator_maximum_{rxn.id}", type="binary")
+        indicator_minimum = prob.Variable(f"indicator_minimum_{rxn.id}", type="binary")
 
         one_direction_constraint = prob.Constraint(
-            indicator_fwd + indicator_rev,
+            indicator_maximum + indicator_minimum,
             ub=1,
             name=f"single_nonzero_direction_{rxn.id}",
         )
 
         # eps * a_i+ <= v_i+ <= M * a_i+
-        on_off_constraint_fwd1 = prob.Constraint(
-            rxn.forward_variable - max_bound * indicator_fwd,
+        on_off_constraint_maximum1 = prob.Constraint(
+            rxn.forward_variable - max_bound * indicator_maximum,
             ub=0,
-            name=f"on_off_fwd1_{rxn.id}",
+            name=f"on_off_maximum1_{rxn.id}",
         )
-        on_off_constraint_fwd2 = prob.Constraint(
-            rxn.forward_variable - flux_threshold * indicator_fwd,
+        on_off_constraint_maximum2 = prob.Constraint(
+            rxn.forward_variable - flux_threshold * indicator_maximum,
             lb=0,
-            name=f"on_off_fwd2_{rxn.id}",
+            name=f"on_off_maximum2_{rxn.id}",
         )
 
         # eps * a_i- <= v_i- <= M * a_i-
-        on_off_constraint_rev1 = prob.Constraint(
-            rxn.reverse_variable - max_bound * indicator_rev,
+        on_off_constraint_minimum1 = prob.Constraint(
+            rxn.reverse_variable - max_bound * indicator_minimum,
             ub=0,
-            name=f"on_off_rev1_{rxn.id}",
+            name=f"on_off_minimum1_{rxn.id}",
         )
-        on_off_constraint_rev2 = prob.Constraint(
-            rxn.reverse_variable - flux_threshold * indicator_rev,
+        on_off_constraint_minimum2 = prob.Constraint(
+            rxn.reverse_variable - flux_threshold * indicator_minimum,
             lb=0,
-            name=f"on_off_rev2_{rxn.id}",
+            name=f"on_off_minimum2_{rxn.id}",
         )
 
         to_add.extend([
-            indicator_fwd, indicator_rev,
+            indicator_maximum, indicator_minimum,
             one_direction_constraint,
-            on_off_constraint_fwd1, on_off_constraint_fwd2,
-            on_off_constraint_rev1, on_off_constraint_rev2,
+            on_off_constraint_maximum1, on_off_constraint_maximum2,
+            on_off_constraint_minimum1, on_off_constraint_minimum2,
         ])
 
         # a_i+ -> G_i <= -1: G_i <= -(max_bound + 1) * a_i+ + max_bound
         delta_g = prob.Variable(f"delta_g_{rxn.id}")
-        delta_g_range_fwd = prob.Constraint(
-            delta_g + (max_bound + 1) * indicator_fwd,
+        delta_g_range_maximum = prob.Constraint(
+            delta_g + (max_bound + 1) * indicator_maximum,
             ub=max_bound,
-            name=f"delta_g_range_fwd_{rxn.id}",
+            name=f"delta_g_range_maximum_{rxn.id}",
         )
 
         # a_i- -> G_i >= 1: G_i >= (max_bound + 1) * a_i- - max_bound
-        delta_g_range_rev = prob.Constraint(
-            delta_g - (max_bound + 1) * indicator_rev,
+        delta_g_range_minimum = prob.Constraint(
+            delta_g - (max_bound + 1) * indicator_minimum,
             lb=-max_bound,
-            name=f"delta_g_range_rev_{rxn.id}",
+            name=f"delta_g_range_minimum_{rxn.id}",
         )
 
-        to_add.extend([delta_g, delta_g_range_fwd, delta_g_range_rev])
+        to_add.extend([delta_g, delta_g_range_maximum, delta_g_range_minimum])
 
     model.add_cons_vars(to_add)
 
@@ -165,6 +167,7 @@ def _add_loopless_with_potentials(
     max_bound: float,
     zero_cutoff: float,
 ):
+    """TODO"""
     prob = model.problem
     
     # Add indicator variables and new constraints
@@ -212,6 +215,7 @@ def _add_loopless_with_potentials_directional(
     max_bound: float,
     zero_cutoff: float,
 ):
+    """TODO"""
     prob = model.problem
 
     # Add potential and indicator variables
@@ -222,44 +226,44 @@ def _add_loopless_with_potentials_directional(
     for i, ridx in enumerate(reactions_to_constrain):
         rxn = model.reactions[ridx]
 
-        indicator_fwd = prob.Variable(f"indicator_fwd_{rxn.id}", type="binary")
-        indicator_rev = prob.Variable(f"indicator_rev_{rxn.id}", type="binary")
+        indicator_maximum = prob.Variable(f"indicator_maximum_{rxn.id}", type="binary")
+        indicator_minimum = prob.Variable(f"indicator_minimum_{rxn.id}", type="binary")
 
         one_direction_constraint = prob.Constraint(
-            indicator_fwd + indicator_rev,
+            indicator_maximum + indicator_minimum,
             ub=1,
             name=f"single_nonzero_direction_{rxn.id}",
         )
 
         # eps * a_i+ <= v_i+ <= M * a_i+
-        on_off_constraint_fwd1 = prob.Constraint(
-            rxn.forward_variable - max_bound * indicator_fwd,
+        on_off_constraint_maximum1 = prob.Constraint(
+            rxn.forward_variable - max_bound * indicator_maximum,
             ub=0,
-            name=f"on_off_fwd1_{rxn.id}",
+            name=f"on_off_maximum1_{rxn.id}",
         )
-        on_off_constraint_fwd2 = prob.Constraint(
-            rxn.forward_variable - flux_threshold * indicator_fwd,
+        on_off_constraint_maximum2 = prob.Constraint(
+            rxn.forward_variable - flux_threshold * indicator_maximum,
             lb=0,
-            name=f"on_off_fwd2_{rxn.id}",
+            name=f"on_off_maximum2_{rxn.id}",
         )
 
         # eps * a_i- <= v_i- <= M * a_i-
-        on_off_constraint_rev1 = prob.Constraint(
-            rxn.reverse_variable - max_bound * indicator_rev,
+        on_off_constraint_minimum1 = prob.Constraint(
+            rxn.reverse_variable - max_bound * indicator_minimum,
             ub=0,
-            name=f"on_off_rev1_{rxn.id}",
+            name=f"on_off_minimum1_{rxn.id}",
         )
-        on_off_constraint_rev2 = prob.Constraint(
-            rxn.reverse_variable - flux_threshold * indicator_rev,
+        on_off_constraint_minimum2 = prob.Constraint(
+            rxn.reverse_variable - flux_threshold * indicator_minimum,
             lb=0,
-            name=f"on_off_rev2_{rxn.id}",
+            name=f"on_off_minimum2_{rxn.id}",
         )
 
         to_add.extend([
-            indicator_fwd, indicator_rev,
+            indicator_maximum, indicator_minimum,
             one_direction_constraint,
-            on_off_constraint_fwd1, on_off_constraint_fwd2,
-            on_off_constraint_rev1, on_off_constraint_rev2,
+            on_off_constraint_maximum1, on_off_constraint_maximum2,
+            on_off_constraint_minimum1, on_off_constraint_minimum2,
         ])
 
     model.add_cons_vars(to_add)
@@ -269,28 +273,28 @@ def _add_loopless_with_potentials_directional(
         col = s_int[:, i]
 
         # a_i+ -> G_i <= -1: G_i <= -(max_bound + 1) * a_i+ + max_bound
-        name_fwd = f"delta_g_range_fwd_{rxn.id}"
-        delta_g_range_fwd = prob.Constraint(
-            Zero, ub=max_bound, name=name_fwd,
+        name_maximum = f"delta_g_range_maximum_{rxn.id}"
+        delta_g_range_maximum = prob.Constraint(
+            Zero, ub=max_bound, name=name_maximum,
         )
         # a_i- -> G_i >= 1: G_i >= (max_bound + 1) * a_i- - max_bound
-        name_rev = f"delta_g_range_rev_{rxn.id}"
-        delta_g_range_rev = prob.Constraint(
-            Zero, lb=-max_bound, name=name_rev,
+        name_minimum = f"delta_g_range_minimum_{rxn.id}"
+        delta_g_range_minimum = prob.Constraint(
+            Zero, lb=-max_bound, name=name_minimum,
         )
-        model.add_cons_vars([delta_g_range_fwd, delta_g_range_rev])
+        model.add_cons_vars([delta_g_range_maximum, delta_g_range_minimum])
 
         coefs = {
             model.variables[f"potential_{j}"]: col[j]
             for j in range(s_int.shape[0])
             if abs(col[j]) > zero_cutoff
         }
-        coefs[model.variables[f"indicator_fwd_{rxn.id}"]] = max_bound + 1
-        model.constraints[name_fwd].set_linear_coefficients(coefs)
+        coefs[model.variables[f"indicator_maximum_{rxn.id}"]] = max_bound + 1
+        model.constraints[name_maximum].set_linear_coefficients(coefs)
 
-        coefs.pop(model.variables[f"indicator_fwd_{rxn.id}"])
-        coefs[model.variables[f"indicator_rev_{rxn.id}"]] = -(max_bound + 1)
-        model.constraints[name_rev].set_linear_coefficients(coefs)
+        coefs.pop(model.variables[f"indicator_maximum_{rxn.id}"])
+        coefs[model.variables[f"indicator_minimum_{rxn.id}"]] = -(max_bound + 1)
+        model.constraints[name_minimum].set_linear_coefficients(coefs)
 
 
 def add_loopless(

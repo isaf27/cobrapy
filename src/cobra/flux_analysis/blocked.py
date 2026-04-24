@@ -1,8 +1,7 @@
-"""TODO"""
+"""Provides functions to find blocked reactions in a model."""
 
 import logging
 from typing import TYPE_CHECKING, List, Optional, Union, Tuple
-from warnings import warn
 
 from optlang.symbolics import Zero
 
@@ -31,9 +30,9 @@ class BlockedReactionsResult(list[str]):
     Attributes
     ----------
     forward_blocked : list of str
-        Reaction identifiers that can't carry flux in the forward direction.
+        Identifiers of reactions that can't carry flux in the forward (positive) direction.
     reverse_blocked: list of str
-        Reaction identifiers that can't carry flux in the reverse direction.
+        Identifiers of reactions that can't carry flux in the reverse (negative) direction.
     """
 
     def __init__(self, forward_blocked, reverse_blocked):
@@ -79,8 +78,10 @@ def find_blocked_reactions(
     -------
     BlockedReactionsResult
         A list of fully blocked reaction identifiers. Also has a
-        ``partially_blocked`` attribute with reactions that can only
-        carry flux in one direction.
+        ``forward_blocked`` attribute with reactions that can only
+        carry flux in the forward (positive) direction and a
+        ``reverse_blocked`` attribute with reactions that can only
+        carry flux in the reverse (negative) direction.
 
     Notes
     -----
@@ -141,6 +142,7 @@ def _build_reactions_to_check_with_loopless(
     reaction_list: List[Union["Reaction", str]],
     zero_cutoff: float,
 ) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """TODO"""
     reaction_ids = [r if isinstance(r, str) else r.id for r in reaction_list]
 
     cyclic_reactions, cyclic_directions = find_cyclic_reactions(
@@ -153,11 +155,54 @@ def _build_reactions_to_check_with_loopless(
     for r_id in reaction_ids:
         if r_id in cyclic_reaction_index:
             c_idx = cyclic_reaction_index[r_id]
-            for dir in ["rev", "fwd"]:
-                if cyclic_directions[c_idx][0 if dir == "rev" else 1]:
+            for dir in ["minimum", "maximum"]:
+                if cyclic_directions[c_idx][0 if dir == "minimum" else 1]:
                     reactions_to_check.append((r_id, dir))
 
     return reactions_to_check, cyclic_reactions
+
+
+def _validate_blocked_reactions(
+    model: "Model",
+    validation_model: "Model",
+    blocked_list: List[Tuple[str, str]],
+    zero_cutoff: float,
+    cyclic_reactions: List[str],
+    processes: Optional[int],
+) -> "BlockedReactionsResult":
+    """TODO"""
+    for rid in cyclic_reactions:
+        max_indicator = model.variables[f"indicator_maximum_{rid}"].primal
+        min_indicator = model.variables[f"indicator_minimum_{rid}"].primal
+        rxn = validation_model.reactions.get_by_id(rid)
+        if max_indicator < 0.5:
+            rxn.upper_bound = 0.0
+        if min_indicator < 0.5:
+            rxn.lower_bound = 0.0
+
+    fluxes = flux_variability_analysis(
+        validation_model,
+        reaction_list=blocked_list,
+        fraction_of_optimum=None,
+        processes=processes,
+    )
+
+    blocked_by_direction = {
+        "maximum": set(),
+        "minimum": set(),
+    }
+    for rid, dir in blocked_list:
+        if abs(fluxes.at[rid, dir]) < zero_cutoff:
+            blocked_by_direction[dir].add(rid)
+
+    for rid in cyclic_reactions:
+        rxn = validation_model.reactions.get_by_id(rid)
+        rxn.bounds = model.reactions.get_by_id(rid).bounds
+
+    return BlockedReactionsResult(
+        forward_blocked=list(blocked_by_direction["maximum"]),
+        reverse_blocked=list(blocked_by_direction["minimum"]),
+    )
 
 
 def _find_blocked_reactions_loopless_directional(
@@ -167,11 +212,11 @@ def _find_blocked_reactions_loopless_directional(
     zero_cutoff: float,
     flux_threshold: float,
     cyclic_reactions: List[str],
+    processes: Optional[int],
 ) -> "BlockedReactionsResult":
+    """TODO"""
     with model:
-        logger.info(
-            f"search with flux_threshold: {len(reaction_list)} reactions to check."
-        )
+        validation_model = model.copy()
 
         add_loopless(
             model,
@@ -181,18 +226,12 @@ def _find_blocked_reactions_loopless_directional(
             flux_threshold=flux_threshold,
         )
 
-        # TODO: add LP-based check using found directions
-
-        logger.info(
-            f"loopless constraints added for {len(cyclic_reactions)} cyclic reactions."
-        )
-
-        blocked_by_direction = {
-            "fwd": set(),
-            "rev": set(),
+        candidates_by_direction = {
+            "maximum": set(),
+            "minimum": set(),
         }
         for rid, dir in reaction_list:
-            blocked_by_direction[dir].add(rid)
+            candidates_by_direction[dir].add(rid)
 
         model.objective = Zero
         coefs = {
@@ -201,40 +240,45 @@ def _find_blocked_reactions_loopless_directional(
         }
         model.objective.set_linear_coefficients(coefs)
         model.objective.direction = "max"
+        
+        blocked_by_direction = {
+            "maximum": set(),
+            "minimum": set(),
+        }
 
-        is_nonzero_num = 0
-        while is_nonzero_num < len(reaction_list):
+        while len(candidates_by_direction["maximum"]) > 0 or len(candidates_by_direction["minimum"]) > 0:
             model.slim_optimize()
             sutil.check_solver_status(model.solver.status)
 
             remove_coef = {}
+            blocked_reactions_to_validate = []
             for rid, dir in reaction_list:
-                if rid in blocked_by_direction[dir]:
+                if rid in candidates_by_direction[dir]:
                     rxn = model.reactions.get_by_id(rid)
-                    if (dir == "fwd" and rxn.forward_variable.primal >= flux_threshold * 0.999) or \
-                       (dir == "rev" and rxn.reverse_variable.primal >= flux_threshold * 0.999):
-                        blocked_by_direction[dir].remove(rid)
+                    if model.variables[f"indicator_{dir}_{rid}"].primal >= 0.5:
+                        candidates_by_direction[dir].remove(rid)
                         remove_coef[model.variables[f"indicator_{dir}_{rid}"]] = 0
-
-            is_nonzero_num += len(remove_coef)
+                        blocked_reactions_to_validate.append((rid, dir))
 
             if len(remove_coef) == 0:
-                logger.info(
-                    f"search with flux_threshold: "
-                    f"{len(reaction_list) - is_nonzero_num} are blocked."
-                )
                 break
 
-            model.objective.set_linear_coefficients(remove_coef)
-            
-            logger.info(
-                f"search with flux_threshold: found {len(remove_coef)} non-blocked reactions, "
-                f"{len(reaction_list) - is_nonzero_num} remain to check."
+            blocked_reactions = _validate_blocked_reactions(
+                model=model,
+                validation_model=validation_model,
+                blocked_list=blocked_reactions_to_validate,
+                zero_cutoff=zero_cutoff,
+                cyclic_reactions=cyclic_reactions,
+                processes=processes,
             )
+            blocked_by_direction["maximum"].update(blocked_reactions.forward_blocked)
+            blocked_by_direction["minimum"].update(blocked_reactions.reverse_blocked)
+
+            model.objective.set_linear_coefficients(remove_coef)
 
         return BlockedReactionsResult(
-            forward_blocked=list(blocked_by_direction["fwd"]),
-            reverse_blocked=list(blocked_by_direction["rev"]),
+            forward_blocked=list(candidates_by_direction["maximum"] | blocked_by_direction["maximum"]),
+            reverse_blocked=list(candidates_by_direction["minimum"] | blocked_by_direction["minimum"]),
         )
 
 
@@ -246,26 +290,18 @@ def _find_blocked_reactions_loopless(
     processes: Optional[int],
     cyclic_reactions: List[str],
 ) -> "BlockedReactionsResult":
+    """TODO"""
     with model:
-        logger.info(
-            f"FVA-based search: {len(reaction_list)} reactions to check."
-        )
-
         add_loopless(
             model,
             zero_cutoff,
             method=loopless,
             reactions=cyclic_reactions,
         )
-        
-        flux_reactions_list = [
-            (r_id, "max" if dir == "fwd" else "min")
-            for r_id, dir in reaction_list
-        ]
 
         flux_span = flux_variability_analysis(
             model,
-            reaction_list=flux_reactions_list,
+            reaction_list=reaction_list,
             fraction_of_optimum=None,
             processes=processes,
         )
@@ -276,7 +312,7 @@ def _find_blocked_reactions_loopless(
         reverse_blocked = flux_span[
             flux_span["minimum"].notna() & (flux_span["minimum"] > -zero_cutoff)
         ].index.tolist()
-        
+
         return BlockedReactionsResult(forward_blocked, reverse_blocked)
 
 
@@ -289,6 +325,7 @@ def find_blocked_reactions_loopless(
     processes: Optional[int] = None,
     flux_threshold: float = 1e-2,
 ) -> List["Reaction"]:
+    """TODO"""
     zero_cutoff = normalize_cutoff(model, zero_cutoff)
 
     with model:
@@ -317,14 +354,17 @@ def find_blocked_reactions_loopless(
             zero_cutoff=zero_cutoff,
             flux_threshold=flux_threshold,
             cyclic_reactions=cyclic_reactions,
+            processes=processes,
         )
 
         logger.info(
-            f"blocked among cyclic via directional: {len(blocked_with_flux_threshold.forward_blocked)}, {len(blocked_with_flux_threshold.reverse_blocked)}"
+            "Found candidates for blocked reactions among cyclic reactions with loopless constraints: "
+            f"{len(blocked_with_flux_threshold.forward_blocked)} (forward), "
+            f"{len(blocked_with_flux_threshold.reverse_blocked)} (reverse)."
         )
 
-        reactions_to_check = [(r_id, "fwd") for r_id in blocked_with_flux_threshold.forward_blocked] + \
-            [(r_id, "rev") for r_id in blocked_with_flux_threshold.reverse_blocked]
+        reactions_to_check = [(r_id, "maximum") for r_id in blocked_with_flux_threshold.forward_blocked] + \
+            [(r_id, "minimum") for r_id in blocked_with_flux_threshold.reverse_blocked]
 
         blocked_with_loopless = _find_blocked_reactions_loopless(
             model=model,
@@ -336,9 +376,11 @@ def find_blocked_reactions_loopless(
         )
 
         logger.info(
-            f"blocked among cyclic: {len(blocked_with_loopless.forward_blocked)}, {len(blocked_with_loopless.reverse_blocked)}"
+            "Found blocked reactions among cyclic reactions with loopless constraints: "
+            f"{len(blocked_with_loopless.forward_blocked)} (forward), "
+            f"{len(blocked_with_loopless.reverse_blocked)} (reverse)."
         )
-        
+
         blocked_without_constraints = find_blocked_reactions(
             model=model,
             reaction_list=reaction_list,

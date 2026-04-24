@@ -86,6 +86,35 @@ def test_flux_variability(
     assert np.allclose(fva_out, fva_results)
 
 
+def test_flux_variability_directional_reactions(model: Model) -> None:
+    """Test FVA with directional reactions passed."""
+    full = flux_variability_analysis(
+        model,
+        reaction_list=["FRD7", "SUCDi", "FUM"],
+        processes=1,
+    )
+    directional = flux_variability_analysis(
+        model,
+        reaction_list=[("FRD7", "max"), ("SUCDi", "min"), "FUM"],
+        processes=1,
+    )
+
+    assert directional.at["FRD7", "maximum"] == pytest.approx(
+        full.at["FRD7", "maximum"]
+    )
+    assert np.isnan(directional.at["FRD7", "minimum"])
+    assert directional.at["SUCDi", "minimum"] == pytest.approx(
+        full.at["SUCDi", "minimum"]
+    )
+    assert np.isnan(directional.at["SUCDi", "maximum"])
+    assert directional.at["FUM", "minimum"] == pytest.approx(
+        full.at["FUM", "minimum"]
+    )
+    assert directional.at["FUM", "maximum"] == pytest.approx(
+        full.at["FUM", "maximum"]
+    )
+
+
 @pytest.mark.skipif("SKIP_MP" in os.environ, reason="unsafe for parallel execution")
 def test_parallel_flux_variability(
     model: Model, fva_results: pd.DataFrame, all_solvers: List[str]

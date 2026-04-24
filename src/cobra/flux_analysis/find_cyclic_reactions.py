@@ -60,7 +60,7 @@ def _create_find_cyclic_reactions_problem(
 def find_cyclic_reactions(
     model: "Model",
     zero_cutoff: Optional[float] = None,
-    bound: float = 1e4,
+    bound: float = 1e3,
     method: str = "optimized",
     required_stop_checks_num: int = 3,
 ) -> Tuple[List[str], List[Tuple[bool, bool]]]:
