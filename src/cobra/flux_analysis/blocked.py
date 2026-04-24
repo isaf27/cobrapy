@@ -24,15 +24,18 @@ configuration = Configuration()
 class BlockedReactionsResult(list[str]):
     """Result of blocked reactions analysis.
 
-    Behaves as a list of fully blocked reactions for backward compatibility,
-    but also carries partially blocked reactions as an attribute.
+    Behaves as a list of fully blocked reaction identifiers for backward
+    compatibility. Fully blocked reactions are blocked in both the forward
+    and reverse directions. Direction-specific blocked reactions are also
+    available through the ``forward_blocked`` and ``reverse_blocked``
+    attributes.
 
     Attributes
     ----------
     forward_blocked : list of str
-        Identifiers of reactions that can't carry flux in the forward (positive) direction.
-    reverse_blocked: list of str
-        Identifiers of reactions that can't carry flux in the reverse (negative) direction.
+        Identifiers of reactions that cannot carry positive flux.
+    reverse_blocked : list of str
+        Identifiers of reactions that cannot carry negative flux.
     """
 
     def __init__(self, forward_blocked, reverse_blocked):
@@ -62,6 +65,12 @@ def find_blocked_reactions(
     reaction_list : list of cobra.Reaction or str, optional
         List of reactions to consider, the default includes all model
         reactions (default None).
+    loopless : str, "fastSNP", "potentials" or "cycleFreeFlux", optional
+        If set, only loopless flux distributions are considered when checking
+        whether reactions can carry flux. The value is passed to
+        :func:`flux_variability_analysis` as its loopless method. Supported
+        values are ``"fastSNP"``, ``"potentials"``, and ``"cycleFreeFlux"``
+        (default None). See :func:`flux_variability_analysis` for more details.
     zero_cutoff : float, optional
         Flux value which is considered to effectively be zero. The default
         is set to use `model.tolerance` (default None).
@@ -78,10 +87,9 @@ def find_blocked_reactions(
     -------
     BlockedReactionsResult
         A list of fully blocked reaction identifiers. Also has a
-        ``forward_blocked`` attribute with reactions that can only
-        carry flux in the forward (positive) direction and a
-        ``reverse_blocked`` attribute with reactions that can only
-        carry flux in the reverse (negative) direction.
+        ``forward_blocked`` attribute with reactions that cannot carry
+        positive flux and a ``reverse_blocked`` attribute with reactions
+        that cannot carry negative flux.
 
     Notes
     -----
@@ -137,12 +145,12 @@ def find_blocked_reactions(
         return BlockedReactionsResult(forward_blocked, reverse_blocked)
 
 
-def _build_reactions_to_check_with_loopless(
+def _prepare_cyclic_reactions_for_blocked(
     model: "Model",
     reaction_list: List[Union["Reaction", str]],
     zero_cutoff: float,
 ) -> Tuple[List[Tuple[str, str]], List[str]]:
-    """TODO"""
+    """Filters reactions to cyclic. They require loopless constraints for blocked check."""
     reaction_ids = [r if isinstance(r, str) else r.id for r in reaction_list]
 
     cyclic_reactions, cyclic_directions = find_cyclic_reactions(
@@ -170,7 +178,7 @@ def _validate_blocked_reactions(
     cyclic_reactions: List[str],
     processes: Optional[int],
 ) -> "BlockedReactionsResult":
-    """TODO"""
+    """Validate blocked candidates by fixing active reactions directions."""
     for rid in cyclic_reactions:
         max_indicator = model.variables[f"indicator_maximum_{rid}"].primal
         min_indicator = model.variables[f"indicator_minimum_{rid}"].primal
@@ -214,7 +222,13 @@ def _find_blocked_reactions_loopless_directional(
     cyclic_reactions: List[str],
     processes: Optional[int],
 ) -> "BlockedReactionsResult":
-    """TODO"""
+    """Find loopless blocked candidates with directional flux indicators.
+
+    This function works efficiently, because it finds many non-blocked
+    reactions in one iteration by maximizing the number of active reactions.
+    However, it may find some non-blocked reactions as blocked (false positives)
+    due to the nature of the optimization problem and the numerical issues.
+    """
     with model:
         validation_model = model.copy()
 
@@ -290,7 +304,11 @@ def _find_blocked_reactions_loopless(
     processes: Optional[int],
     cyclic_reactions: List[str],
 ) -> "BlockedReactionsResult":
-    """TODO"""
+    """Find blocked reactions like :func:`find_blocked_reactions`.
+
+    It is a helper function, which accepts precomputed ``cyclic_reactions``
+    to avoid calculating them twice.
+    """
     with model:
         add_loopless(
             model,
@@ -319,13 +337,63 @@ def _find_blocked_reactions_loopless(
 def find_blocked_reactions_loopless(
     model: "Model",
     reaction_list: Optional[List[Union["Reaction", str]]] = None,
-    loopless: str = 'potentials',
+    loopless: str = "potentials",
     zero_cutoff: Optional[float] = None,
     open_exchanges: bool = False,
     processes: Optional[int] = None,
     flux_threshold: float = 1e-2,
 ) -> List["Reaction"]:
-    """TODO"""
+    """Find reactions that cannot carry flux with loopless flux distribution.
+
+    This is a much faster alternative to calling
+    :func:`find_blocked_reactions` with a loopless value. It first identifies
+    reactions that can participate in cycles and then applies loopless
+    constraints only where they can affect the blocked-reaction result.
+
+    The question whether or not a reaction is blocked is highly dependent
+    on the current exchange reaction settings for a COBRA model. Hence an
+    argument is provided to open all exchange reactions.
+
+    Parameters
+    ----------
+    model : cobra.Model
+        The model to analyze.
+    reaction_list : list of cobra.Reaction or str, optional
+        List of reactions to consider, the default includes all model
+        reactions (default None).
+    loopless : str, "potentials", "fastSNP", optional
+        The loopless formulation passed to :func:`add_loopless`. The default
+        uses metabolite potential variables (default "potentials").
+    zero_cutoff : float, optional
+        Flux value which is considered to effectively be zero. The default
+        is set to use `model.tolerance` (default None).
+    open_exchanges : bool, optional
+        Whether or not to open all exchange reactions to very high flux
+        ranges (default False).
+    processes : int, optional
+        The number of parallel processes to run. Can speed up the
+        computations if the number of reactions is large. If not explicitly
+        passed, it will be set from the global configuration singleton
+        (default None).
+    flux_threshold : float, optional
+        Minimum flux required when directional loopless indicator variables
+        are active. This is used to find blocked candidates efficiently before
+        validating them with regular loopless FVA and ``zero_cutoff``
+        (default 1e-2).
+
+    Returns
+    -------
+    BlockedReactionsResult
+        A list of fully blocked reaction identifiers. Also has a
+        ``forward_blocked`` attribute with reactions that cannot carry
+        positive flux and a ``reverse_blocked`` attribute with reactions
+        that cannot carry negative flux.
+
+    Notes
+    -----
+    Sink and demand reactions are left untouched. Please modify them manually.
+
+    """
     zero_cutoff = normalize_cutoff(model, zero_cutoff)
 
     with model:
@@ -341,7 +409,7 @@ def find_blocked_reactions_loopless(
         if reaction_list is None:
             reaction_list = model.reactions
 
-        reactions_to_check, cyclic_reactions = _build_reactions_to_check_with_loopless(
+        reactions_to_check, cyclic_reactions = _prepare_cyclic_reactions_for_blocked(
             model=model,
             reaction_list=reaction_list,
             zero_cutoff=zero_cutoff,

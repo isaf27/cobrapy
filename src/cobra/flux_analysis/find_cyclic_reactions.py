@@ -75,7 +75,7 @@ def find_cyclic_reactions(
         The default uses the `model.tolerance` (default None).
     bound : float, optional
         The bound for the reaction fluxes in the optimization problem.
-        (default is 1e4).
+        (default is 1e3).
     method : str, optional
         The method to use for finding cyclic reactions.
         Options are "optimized" (default) or "basic".
