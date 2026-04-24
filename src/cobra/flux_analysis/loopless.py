@@ -24,7 +24,7 @@ def _add_loopless_with_nullspace(
     max_bound: float,
     zero_cutoff: float,
 ):
-    """Add a nullspace-based loopless constraints."""
+    """Add nullspace-based loopless constraints."""
     prob = model.problem
 
     # Add indicator variables and new constraints
@@ -314,7 +314,7 @@ def add_loopless(
 
     In most cases you probably want to use the much faster
     `loopless_solution`. May be used in cases where you want to add complex
-    constraints and objecives (for instance quadratic objectives) to the
+    constraints and objectives (for instance quadratic objectives) to the
     model afterwards or use an approximation of Gibbs free energy directions
     in your model.
 
@@ -327,14 +327,13 @@ def add_loopless(
         smaller than `zero_cutoff` are considered to be zero. The default
         uses the `model.tolerance` (default None).
     method : str, "original", "fastSNP", or "potentials", optional
-        The method to use for finding the null space. The "original" method
-        uses the original method from [1]_, while "fastSNP" uses a faster
-        implementation based on the FastSNP algorithm. The "potentials"
-        method adds constraints based on metabolite potential variables.
-        The "fastSNP" and "potentials" methods are much faster and should
-        be used. These two methods have approximately the same speed and
-        can be faster or slower for depending on models and optimization
-        problems.
+        The method used to add loopless constraints. The "original" method
+        uses the original nullspace formulation from [1]_, while "fastSNP"
+        uses a faster nullspace implementation based on the FastSNP
+        algorithm. The "potentials" method adds constraints based on
+        metabolite potential variables. The "fastSNP" and "potentials"
+        methods are much faster in most cases, with relative performance
+        depending on the model and optimization problem.
     reactions : list of str, optional
         The list of reaction IDs to constrain. All cycles within these
         reactions will be removed. If `None`, all reactions will be constrained.

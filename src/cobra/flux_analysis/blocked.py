@@ -150,7 +150,7 @@ def _prepare_cyclic_reactions_for_blocked(
     reaction_list: List[Union["Reaction", str]],
     zero_cutoff: float,
 ) -> Tuple[List[Tuple[str, str]], List[str]]:
-    """Filters reactions to cyclic. They require loopless constraints for blocked check."""
+    """Filters reactions to cyclic directions for loopless blocked checks."""
     reaction_ids = [r if isinstance(r, str) else r.id for r in reaction_list]
 
     cyclic_reactions, cyclic_directions = find_cyclic_reactions(
@@ -178,7 +178,7 @@ def _validate_blocked_reactions(
     cyclic_reactions: List[str],
     processes: Optional[int],
 ) -> "BlockedReactionsResult":
-    """Validate blocked candidates by fixing active reactions directions."""
+    """Validate blocked candidates by fixing inactive cyclic directions."""
     for rid in cyclic_reactions:
         max_indicator = model.variables[f"indicator_maximum_{rid}"].primal
         min_indicator = model.variables[f"indicator_minimum_{rid}"].primal
@@ -224,10 +224,11 @@ def _find_blocked_reactions_loopless_directional(
 ) -> "BlockedReactionsResult":
     """Find loopless blocked candidates with directional flux indicators.
 
-    This function works efficiently, because it finds many non-blocked
+    This function works efficiently because it finds many non-blocked
     reactions in one iteration by maximizing the number of active reactions.
-    However, it may find some non-blocked reactions as blocked (false positives)
-    due to the nature of the optimization problem and the numerical issues.
+    However, it may mark some non-blocked reactions as blocked (false
+    positives) due to the nature of the optimization problem and numerical
+    issues.
     """
     with model:
         validation_model = model.copy()
@@ -306,8 +307,8 @@ def _find_blocked_reactions_loopless(
 ) -> "BlockedReactionsResult":
     """Find blocked reactions like :func:`find_blocked_reactions`.
 
-    It is a helper function, which accepts precomputed ``cyclic_reactions``
-    to avoid calculating them twice.
+    This helper accepts precomputed ``cyclic_reactions`` to avoid calculating
+    them twice.
     """
     with model:
         add_loopless(
@@ -343,10 +344,10 @@ def find_blocked_reactions_loopless(
     processes: Optional[int] = None,
     flux_threshold: float = 1e-2,
 ) -> List["Reaction"]:
-    """Find reactions that cannot carry flux with loopless flux distribution.
+    """Find reactions that cannot carry flux in loopless flux distributions.
 
     This is a much faster alternative to calling
-    :func:`find_blocked_reactions` with a loopless value. It first identifies
+    :func:`find_blocked_reactions` with a loopless method. It first identifies
     reactions that can participate in cycles and then applies loopless
     constraints only where they can affect the blocked-reaction result.
 
@@ -361,7 +362,7 @@ def find_blocked_reactions_loopless(
     reaction_list : list of cobra.Reaction or str, optional
         List of reactions to consider, the default includes all model
         reactions (default None).
-    loopless : str, "potentials", "fastSNP", optional
+    loopless : str, "potentials", "fastSNP" or "original", optional
         The loopless formulation passed to :func:`add_loopless`. The default
         uses metabolite potential variables (default "potentials").
     zero_cutoff : float, optional

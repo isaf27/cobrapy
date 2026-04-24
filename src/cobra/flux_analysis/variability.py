@@ -109,16 +109,16 @@ def flux_variability_analysis(
         can be ``"minimum"``, ``"maximum"``, ``"min"``, or ``"max"``. If a
         direction is given, only that bound is computed for the reaction. If
         ``None``, all reactions and both bounds are used (default None).
-    loopless : str, "fastSNP", "potentials" or "cycleFreeFlux", optional
+    loopless : str, "potentials", "fastSNP" or "cycleFreeFlux", optional
         If this value is set, only loopless solutions will be returned.
-        Boolean values are deprecated. Provided value means the algorithm
+        Boolean values are deprecated. The value selects the algorithm used
         to constrain the model to loopless solutions.
         Please also refer to the notes (default None).
     fraction_of_optimum : float, optional
         Must be <= 1.0. Requires that the objective value is at least the
         fraction times maximum objective value. A value of 0.85 for instance
-        means that the objective has to be at least at 85% percent of its
-        maximum. If set to ``None``, the original objective is not constrained
+        means that the objective has to be at least 85% of its maximum.
+        If set to ``None``, the original objective is not constrained
         (default 1.0).
     pfba_factor : float, optional
         Add an additional constraint to the model that requires the total sum
@@ -156,8 +156,9 @@ def flux_variability_analysis(
     If `loopless` is set to "potentials" or "fastSNP", the optimal loopless
     flux bounds will be found by adding loopless constraints to the model.
     The "fastSNP" method uses the efficient Fast-SNP algorithm (see [2]_),
-    while "potentials" uses metabolite potential variables. See `add_loopless`
-    for details of these loopless constraints formulations.
+    while "potentials" uses metabolite potential variables. See
+    :func:`add_loopless` for details of these loopless constraint
+    formulations.
 
     If `loopless` is set to "cycleFreeFlux", the loops removal algorithm will be
     used (see [3]_). Note: this algorithm does not guarantee to find optimal bounds.
