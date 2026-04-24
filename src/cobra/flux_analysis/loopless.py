@@ -66,8 +66,8 @@ def _add_loopless_with_nullspace(
             if abs(row[i]) > zero_cutoff
         }
         model.constraints[name].set_linear_coefficients(coefs)
-        
-        
+
+
 def _add_loopless_with_nullspace_directional(
     model: "Model",
     n_int: np.ndarray,
@@ -81,7 +81,7 @@ def _add_loopless_with_nullspace_directional(
 
     # Add indicator variables and new constraints
     to_add = []
-    for i, ridx in enumerate(reactions_to_constrain):
+    for ridx in reactions_to_constrain:
         rxn = model.reactions[ridx]
 
         indicator_maximum = prob.Variable(f"indicator_maximum_{rxn.id}", type="binary")
@@ -117,12 +117,17 @@ def _add_loopless_with_nullspace_directional(
             name=f"on_off_minimum2_{rxn.id}",
         )
 
-        to_add.extend([
-            indicator_maximum, indicator_minimum,
-            one_direction_constraint,
-            on_off_constraint_maximum1, on_off_constraint_maximum2,
-            on_off_constraint_minimum1, on_off_constraint_minimum2,
-        ])
+        to_add.extend(
+            [
+                indicator_maximum,
+                indicator_minimum,
+                one_direction_constraint,
+                on_off_constraint_maximum1,
+                on_off_constraint_maximum2,
+                on_off_constraint_minimum1,
+                on_off_constraint_minimum2,
+            ]
+        )
 
         # a_i+ -> G_i <= -1: G_i <= -(max_bound + 1) * a_i+ + max_bound
         delta_g = prob.Variable(f"delta_g_{rxn.id}")
@@ -165,13 +170,13 @@ def _add_loopless_with_potentials(
 ):
     """Add loopless constraints using metabolite potential variables."""
     prob = model.problem
-    
+
     # Add indicator variables and new constraints
     to_add = []
     for i in range(s_int.shape[0]):
         to_add.append(prob.Variable(f"potential_{i}"))
 
-    for i, ridx in enumerate(reactions_to_constrain):
+    for ridx in reactions_to_constrain:
         rxn = model.reactions[ridx]
         # indicator variable a_i
         indicator = prob.Variable(f"indicator_{rxn.id}", type="binary")
@@ -199,7 +204,7 @@ def _add_loopless_with_potentials(
             for i in range(s_int.shape[0])
             if abs(col[i]) > zero_cutoff
         }
-        coefs[model.variables[f"indicator_{rxn.id}"]] = (max_bound + 1)
+        coefs[model.variables[f"indicator_{rxn.id}"]] = max_bound + 1
         model.constraints[name].set_linear_coefficients(coefs)
 
 
@@ -219,7 +224,7 @@ def _add_loopless_with_potentials_directional(
     for i in range(s_int.shape[0]):
         to_add.append(prob.Variable(f"potential_{i}"))
 
-    for i, ridx in enumerate(reactions_to_constrain):
+    for ridx in reactions_to_constrain:
         rxn = model.reactions[ridx]
 
         indicator_maximum = prob.Variable(f"indicator_maximum_{rxn.id}", type="binary")
@@ -255,12 +260,17 @@ def _add_loopless_with_potentials_directional(
             name=f"on_off_minimum2_{rxn.id}",
         )
 
-        to_add.extend([
-            indicator_maximum, indicator_minimum,
-            one_direction_constraint,
-            on_off_constraint_maximum1, on_off_constraint_maximum2,
-            on_off_constraint_minimum1, on_off_constraint_minimum2,
-        ])
+        to_add.extend(
+            [
+                indicator_maximum,
+                indicator_minimum,
+                one_direction_constraint,
+                on_off_constraint_maximum1,
+                on_off_constraint_maximum2,
+                on_off_constraint_minimum1,
+                on_off_constraint_minimum2,
+            ]
+        )
 
     model.add_cons_vars(to_add)
 
@@ -271,12 +281,16 @@ def _add_loopless_with_potentials_directional(
         # a_i+ -> G_i <= -1: G_i <= -(max_bound + 1) * a_i+ + max_bound
         name_maximum = f"delta_g_range_maximum_{rxn.id}"
         delta_g_range_maximum = prob.Constraint(
-            Zero, ub=max_bound, name=name_maximum,
+            Zero,
+            ub=max_bound,
+            name=name_maximum,
         )
         # a_i- -> G_i >= 1: G_i >= (max_bound + 1) * a_i- - max_bound
         name_minimum = f"delta_g_range_minimum_{rxn.id}"
         delta_g_range_minimum = prob.Constraint(
-            Zero, lb=-max_bound, name=name_minimum,
+            Zero,
+            lb=-max_bound,
+            name=name_minimum,
         )
         model.add_cons_vars([delta_g_range_maximum, delta_g_range_minimum])
 
@@ -392,8 +406,10 @@ def add_loopless(
         except AttributeError:
             integrality_tolerance = None
 
-        if integrality_tolerance is None or \
-            max_bound * integrality_tolerance >= flux_threshold * 0.5:
+        if (
+            integrality_tolerance is None
+            or max_bound * integrality_tolerance >= flux_threshold * 0.5
+        ):
             warn(
                 "Loopless constraints may not work properly "
                 "with the provided `flux_threshold` and solver tolerances. "
@@ -439,7 +455,7 @@ def add_loopless(
                 directions_int,
                 zero_cutoff=zero_cutoff,
             ).T
-        
+
         if flux_threshold is not None:
             _add_loopless_with_nullspace_directional(
                 model,

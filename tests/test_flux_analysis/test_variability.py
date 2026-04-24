@@ -9,8 +9,8 @@ import pytest
 
 from cobra import Model
 from cobra.exceptions import Infeasible
+from cobra.flux_analysis import find_blocked_reactions
 from cobra.flux_analysis.variability import (
-    find_blocked_reactions,
     find_essential_genes,
     find_essential_reactions,
     flux_variability_analysis,
@@ -107,12 +107,8 @@ def test_flux_variability_directional_reactions(model: Model) -> None:
         full.at["SUCDi", "minimum"]
     )
     assert np.isnan(directional.at["SUCDi", "maximum"])
-    assert directional.at["FUM", "minimum"] == pytest.approx(
-        full.at["FUM", "minimum"]
-    )
-    assert directional.at["FUM", "maximum"] == pytest.approx(
-        full.at["FUM", "maximum"]
-    )
+    assert directional.at["FUM", "minimum"] == pytest.approx(full.at["FUM", "minimum"])
+    assert directional.at["FUM", "maximum"] == pytest.approx(full.at["FUM", "maximum"])
 
 
 @pytest.mark.skipif("SKIP_MP" in os.environ, reason="unsafe for parallel execution")

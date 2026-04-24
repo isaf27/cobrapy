@@ -1,6 +1,5 @@
 """Provide variability based methods such as flux variability or gene essentiality."""
 
-import time
 import logging
 from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Union
 from warnings import warn
@@ -91,7 +90,9 @@ def _fva_step(reaction_id: str) -> Tuple[str, float]:
 
 def flux_variability_analysis(
     model: "Model",
-    reaction_list: Optional[List[Union["Reaction", str, Tuple[Union["Reaction", str], str]]]] = None,
+    reaction_list: Optional[
+        List[Union["Reaction", str, Tuple[Union["Reaction", str], str]]]
+    ] = None,
     loopless: Union[Optional[str], bool] = None,
     fraction_of_optimum: Optional[float] = 1.0,
     pfba_factor: Optional[float] = None,
@@ -103,7 +104,8 @@ def flux_variability_analysis(
     ----------
     model : cobra.Model
         The model for which to run the analysis. It will *not* be modified.
-    reaction_list : list of cobra.Reaction or str or tuple of (cobra.Reaction or str, str), optional
+    reaction_list : list of cobra.Reaction or str or tuple of (cobra.Reaction
+        or str, str), optional
         The reactions for which to obtain flux bounds. Entries can be
         reactions, reaction IDs, or ``(reaction, direction)`` tuples. Direction
         can be ``"minimum"``, ``"maximum"``, ``"min"``, or ``"max"``. If a
@@ -191,7 +193,8 @@ def flux_variability_analysis(
 
     if loopless not in (None, "potentials", "fastSNP", "cycleFreeFlux"):
         raise ValueError(
-            "The `loopless` argument must be either None, 'potentials', 'fastSNP' or 'cycleFreeFlux'."
+            "The `loopless` argument must be either None, 'potentials', "
+            "'fastSNP' or 'cycleFreeFlux'."
         )
 
     if reaction_list is None:
