@@ -360,11 +360,12 @@ def add_loopless(
     Notes
     -----
     When `flux_threshold` is provided, the directional formulation strongly
-    relies on binary indicator variables. If the product of the largest model
+    relies on binary indicator variables. If the product of the maximum model
     bound and the solver integrality tolerance is close to `flux_threshold`,
     numerical tolerances can make inactive directions appear feasible.
-    Increasing `flux_threshold`, lowering the solver integrality tolerance,
-    or using a different MILP solver can reduce this risk.
+    Increasing `flux_threshold`, decreasing the maximum model bound,
+    lowering the solver integrality tolerance, or using a different MILP
+    solver can reduce this risk.
 
     References
     ----------
@@ -412,13 +413,16 @@ def add_loopless(
         ):
             warn(
                 "Loopless constraints may not work properly "
-                "with the provided `flux_threshold` and solver tolerances. "
+                f"with the provided `flux_threshold`={flux_threshold}, "
+                f"maximum model bound={max_bound}, and solver integrality "
+                f"tolerance={integrality_tolerance}. "
                 "This can happen due to numerical instability. "
                 "Possible remedies are increasing `flux_threshold`, "
+                "decreasing the maximum model bound, "
                 "switching to a different solver, "
-                "or decreasing the solver `integrality` tolerance. Please, "
-                "carefully read the note on numerical instability "
-                "in the function documentation.",
+                "or decreasing the solver `integrality` tolerance. "
+                "Please carefully read the note on numerical instability "
+                "in the `add_loopless` function documentation.",
                 UserWarning,
             )
 

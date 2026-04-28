@@ -84,7 +84,6 @@ def _warn_near_zero_cutoff_fluxes(flux_span, zero_cutoff: float) -> None:
         f"zero_cutoff={zero_cutoff}, which may make "
         f"the blocked reaction result sensitive to numerical tolerance: {fluxes}.",
         UserWarning,
-        stacklevel=2,
     )
 
 
