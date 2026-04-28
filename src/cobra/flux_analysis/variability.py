@@ -25,7 +25,53 @@ logger = logging.getLogger(__name__)
 configuration = Configuration()
 
 
-def _init_worker(model: "Model", loopless: bool, sense: str) -> None:
+def _init_abs_flux_clip_target(abs_flux_clip: Optional[float], sense: str) -> None:
+    """Initialize global target variables for absolute flux clipping."""
+
+    global _abs_flux_clip_target
+    global _abs_flux_clip_constraint
+    _abs_flux_clip_target = None
+    _abs_flux_clip_constraint = None
+
+    if abs_flux_clip is None:
+        return
+
+    target_name = "_fva_abs_flux_clip_target"
+    constraint_name = "_fva_abs_flux_clip_constraint"
+
+    if target_name in _model.solver.variables:
+        _abs_flux_clip_target = _model.variables[target_name]
+    else:
+        _abs_flux_clip_target = _model.problem.Variable(target_name)
+        _model.add_cons_vars([_abs_flux_clip_target])
+
+    if constraint_name in _model.solver.constraints:
+        _abs_flux_clip_constraint = _model.constraints[constraint_name]
+    else:
+        _abs_flux_clip_constraint = _model.problem.Constraint(
+            Zero,
+            name=constraint_name,
+        )
+        _model.add_cons_vars([_abs_flux_clip_constraint])
+
+    if sense == "max":
+        _abs_flux_clip_target.lb = None
+        _abs_flux_clip_target.ub = abs_flux_clip
+        _abs_flux_clip_constraint.ub = 0
+        _abs_flux_clip_constraint.lb = None
+    else:
+        _abs_flux_clip_target.lb = -abs_flux_clip
+        _abs_flux_clip_target.ub = None
+        _abs_flux_clip_constraint.lb = 0
+        _abs_flux_clip_constraint.ub = None
+
+
+def _init_worker(
+    model: "Model",
+    loopless: bool,
+    sense: str,
+    abs_flux_clip: Optional[float],
+) -> None:
     """Initialize a global model object for multiprocessing.
 
     Parameters
@@ -36,13 +82,19 @@ def _init_worker(model: "Model", loopless: bool, sense: str) -> None:
         Whether to use loopless version.
     sense: {"max", "min"}
         Whether to maximise or minimise objective.
+    abs_flux_clip: float, optional
+        Clips optimal flux values by absolute value.
 
     """
     global _model
     global _loopless
+    global _abs_flux_clip
     _model = model
     _model.solver.objective.direction = sense
     _loopless = loopless
+    _abs_flux_clip = abs_flux_clip
+
+    _init_abs_flux_clip_target(None if loopless else abs_flux_clip, sense)
 
 
 def _fva_step(reaction_id: str) -> Tuple[str, float]:
@@ -61,30 +113,63 @@ def _fva_step(reaction_id: str) -> Tuple[str, float]:
     """
     global _model
     global _loopless
+    global _abs_flux_clip
+    global _abs_flux_clip_target
+    global _abs_flux_clip_constraint
+
     rxn = _model.reactions.get_by_id(reaction_id)
+
     # The previous objective assignment already triggers a reset
     # so directly update coefs here to not trigger redundant resets
     # in the history manager which can take longer than the actual
     # FVA for small models
-    _model.solver.objective.set_linear_coefficients(
-        {rxn.forward_variable: 1, rxn.reverse_variable: -1}
-    )
-    _model.slim_optimize()
-    sutil.check_solver_status(_model.solver.status)
-    if _loopless:
-        value = loopless_fva_iter(_model, rxn)
-    else:
-        value = _model.solver.objective.value
-    # handle infeasible case
-    if value is None:
-        value = float("nan")
-        logger.warning(
-            f"Could not get flux for reaction {rxn.id}, setting it to NaN. "
-            "This is usually due to numerical instability."
-        )
-    _model.solver.objective.set_linear_coefficients(
-        {rxn.forward_variable: 0, rxn.reverse_variable: 0}
-    )
+    try:
+        if _abs_flux_clip_target is None:
+            _model.solver.objective.set_linear_coefficients(
+                {rxn.forward_variable: 1, rxn.reverse_variable: -1}
+            )
+        else:
+            _abs_flux_clip_constraint.set_linear_coefficients(
+                {
+                    _abs_flux_clip_target: 1,
+                    rxn.forward_variable: -1,
+                    rxn.reverse_variable: 1,
+                }
+            )
+            _model.solver.objective.set_linear_coefficients({_abs_flux_clip_target: 1})
+
+        _model.slim_optimize()
+        sutil.check_solver_status(_model.solver.status)
+        if _loopless:
+            value = loopless_fva_iter(_model, rxn)
+        else:
+            value = _model.solver.objective.value
+
+        # handle infeasible case
+        if value is None:
+            value = float("nan")
+            logger.warning(
+                f"Could not get flux for reaction {rxn.id}, setting it to NaN. "
+                "This is usually due to numerical instability."
+            )
+        else:
+            if _abs_flux_clip is not None:
+                value = min(max(value, -_abs_flux_clip), _abs_flux_clip)
+    finally:
+        if _abs_flux_clip_target is None:
+            _model.solver.objective.set_linear_coefficients(
+                {rxn.forward_variable: 0, rxn.reverse_variable: 0}
+            )
+        else:
+            _model.solver.objective.set_linear_coefficients({_abs_flux_clip_target: 0})
+            _abs_flux_clip_constraint.set_linear_coefficients(
+                {
+                    _abs_flux_clip_target: 0,
+                    rxn.forward_variable: 0,
+                    rxn.reverse_variable: 0,
+                }
+            )
+
     return reaction_id, value
 
 
@@ -96,6 +181,7 @@ def flux_variability_analysis(
     loopless: Union[Optional[str], bool] = None,
     fraction_of_optimum: Optional[float] = 1.0,
     pfba_factor: Optional[float] = None,
+    abs_flux_clip: Optional[float] = None,
     processes: Optional[int] = None,
 ) -> pd.DataFrame:
     """Determine the minimum and maximum flux value for each reaction.
@@ -131,6 +217,11 @@ def flux_variability_analysis(
         one that optimally minimizes the total flux sum, the `pfba_factor`
         should, if set, be larger than one. Setting this value may lead to
         more realistic predictions of the effective flux bounds
+        (default None).
+    abs_flux_clip : float, optional
+        Maximum absolute flux value reported by variability analysis. When set,
+        maximum flux values are clipped to ``abs_flux_clip`` and minimum flux
+        values are clipped to ``-abs_flux_clip``
         (default None).
     processes : int, optional
         The number of parallel processes to run. If not explicitly passed,
@@ -196,6 +287,9 @@ def flux_variability_analysis(
             "The `loopless` argument must be either None, 'potentials', "
             "'fastSNP' or 'cycleFreeFlux'."
         )
+
+    if abs_flux_clip is not None and abs_flux_clip < 0:
+        raise ValueError("The `abs_flux_clip` argument must be non-negative.")
 
     if reaction_list is None:
         reaction_ids = [r.id for r in model.reactions]
@@ -351,14 +445,19 @@ def flux_variability_analysis(
                     with ProcessPool(
                         cur_processes,
                         initializer=_init_worker,
-                        initargs=(model, run_cycle_free_flux, what[:3]),
+                        initargs=(
+                            model,
+                            run_cycle_free_flux,
+                            what[:3],
+                            abs_flux_clip,
+                        ),
                     ) as pool:
                         for rxn_id, value in pool.imap_unordered(
                             _fva_step, opt_rxn_ids[what], chunksize=chunk_size
                         ):
                             fva_result.at[rxn_id, what] = value
                 else:
-                    _init_worker(model, run_cycle_free_flux, what[:3])
+                    _init_worker(model, run_cycle_free_flux, what[:3], abs_flux_clip)
                     for rxn_id, value in map(_fva_step, opt_rxn_ids[what]):
                         fva_result.at[rxn_id, what] = value
 

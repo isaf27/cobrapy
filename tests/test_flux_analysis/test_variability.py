@@ -110,6 +110,28 @@ def test_flux_variability_directional_reactions(model: Model) -> None:
     assert directional.at["FUM", "maximum"] == pytest.approx(full.at["FUM", "maximum"])
 
 
+def test_flux_variability_abs_flux_clip(model: Model, all_solvers: List[str]) -> None:
+    """Test FVA with clipped absolute flux values."""
+    model.solver = all_solvers
+    abs_flux_clip = 10.0
+
+    fva_out = flux_variability_analysis(
+        model,
+        fraction_of_optimum=None,
+        processes=1,
+    )
+    expected = fva_out.clip(lower=-abs_flux_clip, upper=abs_flux_clip)
+
+    clipped_fva_out = flux_variability_analysis(
+        model,
+        fraction_of_optimum=None,
+        abs_flux_clip=abs_flux_clip,
+        processes=1,
+    )
+
+    assert np.allclose(clipped_fva_out, expected)
+
+
 @pytest.mark.skipif("SKIP_MP" in os.environ, reason="unsafe for parallel execution")
 def test_parallel_flux_variability(
     model: Model, fva_results: pd.DataFrame, all_solvers: List[str]
@@ -119,6 +141,31 @@ def test_parallel_flux_variability(
     fva_out = flux_variability_analysis(model, processes=2)
     fva_out.sort_index(inplace=True)
     assert np.allclose(fva_out, fva_results)
+
+
+@pytest.mark.skipif("SKIP_MP" in os.environ, reason="unsafe for parallel execution")
+def test_parallel_flux_variability_abs_flux_clip(
+    model: Model, all_solvers: List[str]
+) -> None:
+    """Test parallel FVA with clipped absolute flux values."""
+    model.solver = all_solvers
+    abs_flux_clip = 10.0
+
+    fva_out = flux_variability_analysis(
+        model,
+        fraction_of_optimum=None,
+        processes=1,
+    )
+    expected = fva_out.clip(lower=-abs_flux_clip, upper=abs_flux_clip)
+
+    clipped_fva_out = flux_variability_analysis(
+        model,
+        fraction_of_optimum=None,
+        abs_flux_clip=abs_flux_clip,
+        processes=2,  # run in parallel
+    )
+
+    assert np.allclose(clipped_fva_out, expected)
 
 
 # Loopless FVA
@@ -152,6 +199,32 @@ def test_flux_variability_loopless(
 
     assert not np.allclose(fva_normal["maximum"], fva_normal["minimum"])
     assert np.allclose(fva_loopless["maximum"], fva_loopless["minimum"])
+
+
+@pytest.mark.parametrize("loopless", ["fastSNP", "potentials", "cycleFreeFlux"])
+def test_flux_variability_loopless_abs_flux_clip(
+    model: Model, all_solvers: List[str], loopless: str
+) -> None:
+    """Test loopless FVA with clipped absolute flux values."""
+    model.solver = all_solvers
+    abs_flux_clip = 3.0
+
+    loop_reactions = [model.reactions.get_by_id(rid) for rid in ("FRD7", "SUCDi")]
+    fva_loopless = flux_variability_analysis(
+        model,
+        reaction_list=loop_reactions,
+        loopless=loopless,
+    )
+    expected = fva_loopless.clip(lower=-abs_flux_clip, upper=abs_flux_clip)
+
+    clipped_fva_out = flux_variability_analysis(
+        model,
+        reaction_list=loop_reactions,
+        loopless=loopless,
+        abs_flux_clip=abs_flux_clip,
+    )
+
+    assert np.allclose(clipped_fva_out, expected)
 
 
 # Internals (essentiality)

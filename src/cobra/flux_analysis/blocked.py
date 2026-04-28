@@ -2,6 +2,7 @@
 
 import logging
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from warnings import warn
 
 import optlang
 from optlang.symbolics import Zero
@@ -44,6 +45,47 @@ class BlockedReactionsResult(list[str]):
         super().__init__(list(set(forward_blocked) & set(reverse_blocked)))
         self.forward_blocked = forward_blocked
         self.reverse_blocked = reverse_blocked
+
+
+def _warn_near_zero_cutoff_fluxes(flux_span, zero_cutoff: float) -> None:
+    """Warn if FVA results are close to the blocked reaction cutoff."""
+    lower_bound = 0.1 * zero_cutoff
+    upper_bound = 100 * zero_cutoff
+
+    closest_below = None
+    closest_above = None
+    for direction in ("minimum", "maximum"):
+        for reaction_id, flux in flux_span[direction].dropna().items():
+            dir_flux = flux * (1 if direction == "maximum" else -1)
+            if dir_flux < lower_bound or dir_flux > upper_bound:
+                continue
+            flux_info = (dir_flux, reaction_id, direction, flux)
+            if dir_flux < zero_cutoff:
+                if closest_below is None or dir_flux > closest_below[0]:
+                    closest_below = flux_info
+            elif closest_above is None or dir_flux < closest_above[0]:
+                closest_above = flux_info
+
+    if closest_below is None and closest_above is None:
+        return
+
+    formatted_fluxes = []
+    for label, flux_info in (("below", closest_below), ("above", closest_above)):
+        if flux_info is None:
+            continue
+        _, reaction_id, direction, flux = flux_info
+        formatted_fluxes.append(
+            f"closest {label}: {reaction_id} ({direction}={flux:.3g})"
+        )
+
+    fluxes = ", ".join(formatted_fluxes)
+    warn(
+        "Some reactions have flux bounds close to "
+        f"zero_cutoff={zero_cutoff}, which may make "
+        f"the blocked reaction result sensitive to numerical tolerance: {fluxes}.",
+        UserWarning,
+        stacklevel=2,
+    )
 
 
 def find_blocked_reactions(
@@ -130,10 +172,10 @@ def find_blocked_reactions(
             model.slim_optimize()
             solution = get_solution(model, reactions=reaction_list)
             forward_unknown = solution.fluxes[
-                solution.fluxes < zero_cutoff
+                solution.fluxes < zero_cutoff * 100
             ].index.tolist()
             reverse_unknown = solution.fluxes[
-                solution.fluxes > -zero_cutoff
+                solution.fluxes > -zero_cutoff * 100
             ].index.tolist()
             reaction_list = [
                 (reaction_id, "maximum") for reaction_id in forward_unknown
@@ -147,7 +189,9 @@ def find_blocked_reactions(
             loopless=loopless,
             fraction_of_optimum=None,
             processes=processes,
+            abs_flux_clip=max(zero_cutoff * 100, 0.1),
         )
+        _warn_near_zero_cutoff_fluxes(flux_span, zero_cutoff)
 
         forward_blocked = flux_span[
             flux_span["maximum"].notna() & (flux_span["maximum"] < zero_cutoff)
@@ -207,7 +251,9 @@ def _validate_blocked_reactions(
         reaction_list=blocked_list,
         fraction_of_optimum=None,
         processes=processes,
+        abs_flux_clip=max(zero_cutoff * 100, 0.1),
     )
+    _warn_near_zero_cutoff_fluxes(fluxes, zero_cutoff)
 
     blocked_by_direction = {
         "maximum": set(),
@@ -342,7 +388,9 @@ def _find_blocked_reactions_loopless(
             reaction_list=reaction_list,
             fraction_of_optimum=None,
             processes=processes,
+            abs_flux_clip=max(zero_cutoff * 100, 0.1),
         )
+        _warn_near_zero_cutoff_fluxes(flux_span, zero_cutoff)
 
         forward_blocked = flux_span[
             flux_span["maximum"].notna() & (flux_span["maximum"] < zero_cutoff)
@@ -356,19 +404,20 @@ def _find_blocked_reactions_loopless(
 
 def _set_mipgap(model: "Model", mipgap: float) -> None:
     """Set MIP gap for the solver."""
+    cplex_interface = getattr(optlang, "cplex_interface", None)
+    gurobi_interface = getattr(optlang, "gurobi_interface", None)
     old_mipgap = None
-    if model.problem == optlang.cplex_interface:
+    if model.problem == cplex_interface:
         old_mipgap = model.solver.problem.parameters.mip.tolerances.mipgap.get()
         model.solver.problem.parameters.mip.tolerances.mipgap.set(mipgap)
-    elif model.problem == optlang.gurobi_interface:
+    elif model.problem == gurobi_interface:
         old_mipgap = model.solver.problem.Params.MIPGap
         model.solver.problem.Params.MIPGap = mipgap
 
     def reset_mipgap():
-        print(old_mipgap)
-        if model.problem == optlang.cplex_interface:
+        if model.problem == cplex_interface:
             model.solver.problem.parameters.mip.tolerances.mipgap.set(old_mipgap)
-        elif model.problem == optlang.gurobi_interface:
+        elif model.problem == gurobi_interface:
             model.solver.problem.Params.MIPGap = old_mipgap
 
     return reset_mipgap
@@ -381,7 +430,7 @@ def find_blocked_reactions_loopless(
     zero_cutoff: Optional[float] = None,
     open_exchanges: bool = False,
     processes: Optional[int] = None,
-    flux_threshold: float = 1e-2,
+    candidates_search_flux_threshold: float = 1e-2,
 ) -> List["Reaction"]:
     """Find reactions that cannot carry flux in loopless flux distributions.
 
@@ -415,7 +464,7 @@ def find_blocked_reactions_loopless(
         computations if the number of reactions is large. If not explicitly
         passed, it will be set from the global configuration singleton
         (default None).
-    flux_threshold : float, optional
+    candidates_search_flux_threshold : float, optional
         Minimum flux required when directional loopless indicator variables
         are active. This is used to find blocked candidates efficiently before
         validating them with regular loopless FVA and ``zero_cutoff``
@@ -433,6 +482,10 @@ def find_blocked_reactions_loopless(
     -----
     Sink and demand reactions are left untouched. Please modify them manually.
 
+    This function assumes that the complete model is feasible with loopless
+    constraints, meaning at least one flux solution exists for the constrained
+    model.
+
     """
     if loopless not in ("potentials", "fastSNP"):
         raise ValueError(
@@ -443,76 +496,86 @@ def find_blocked_reactions_loopless(
 
     reset_mipgap_cb = _set_mipgap(model, mipgap=1.0)
 
-    with model:
-        max_bound = max(
-            1000.0, max(max(abs(b) for b in r.bounds) for r in model.reactions)
-        )
+    try:
+        with model:
+            max_bound = max(
+                1000.0, max(max(abs(b) for b in r.bounds) for r in model.reactions)
+            )
 
-        if open_exchanges:
-            for reaction in model.exchanges:
-                reaction.bounds = (
-                    min(reaction.lower_bound, -max_bound),
-                    max(reaction.upper_bound, max_bound),
+            if open_exchanges:
+                for reaction in model.exchanges:
+                    reaction.bounds = (
+                        min(reaction.lower_bound, -max_bound),
+                        max(reaction.upper_bound, max_bound),
+                    )
+
+            if reaction_list is None:
+                reaction_list = model.reactions
+
+            reactions_to_check, cyclic_reactions = (
+                _prepare_cyclic_reactions_for_blocked(
+                    model=model,
+                    reaction_list=reaction_list,
+                    zero_cutoff=zero_cutoff,
                 )
+            )
 
-        if reaction_list is None:
-            reaction_list = model.reactions
+            blocked_candidates = _find_blocked_reactions_loopless_directional(
+                model=model,
+                reaction_list=reactions_to_check,
+                loopless=loopless,
+                zero_cutoff=zero_cutoff,
+                flux_threshold=candidates_search_flux_threshold,
+                cyclic_reactions=cyclic_reactions,
+                processes=processes,
+            )
 
-        reactions_to_check, cyclic_reactions = _prepare_cyclic_reactions_for_blocked(
-            model=model,
-            reaction_list=reaction_list,
-            zero_cutoff=zero_cutoff,
-        )
+            logger.info(
+                "Found candidates for blocked reactions among cyclic reactions "
+                "with loopless constraints: "
+                f"{len(blocked_candidates.forward_blocked)} (forward), "
+                f"{len(blocked_candidates.reverse_blocked)} (reverse)."
+            )
 
-        blocked_with_flux_threshold = _find_blocked_reactions_loopless_directional(
-            model=model,
-            reaction_list=reactions_to_check,
-            loopless=loopless,
-            zero_cutoff=zero_cutoff,
-            flux_threshold=flux_threshold,
-            cyclic_reactions=cyclic_reactions,
-            processes=processes,
-        )
+            reactions_to_check = [
+                (r_id, "maximum") for r_id in blocked_candidates.forward_blocked
+            ] + [(r_id, "minimum") for r_id in blocked_candidates.reverse_blocked]
 
-        logger.info(
-            "Found candidates for blocked reactions among cyclic reactions "
-            "with loopless constraints: "
-            f"{len(blocked_with_flux_threshold.forward_blocked)} (forward), "
-            f"{len(blocked_with_flux_threshold.reverse_blocked)} (reverse)."
-        )
+            blocked_cyclic = _find_blocked_reactions_loopless(
+                model=model,
+                reaction_list=reactions_to_check,
+                loopless=loopless,
+                zero_cutoff=zero_cutoff,
+                processes=processes,
+                cyclic_reactions=cyclic_reactions,
+            )
 
-        reactions_to_check = [
-            (r_id, "maximum") for r_id in blocked_with_flux_threshold.forward_blocked
-        ] + [(r_id, "minimum") for r_id in blocked_with_flux_threshold.reverse_blocked]
+            logger.info(
+                "Found blocked reactions among cyclic reactions "
+                "with loopless constraints: "
+                f"{len(blocked_cyclic.forward_blocked)} (forward), "
+                f"{len(blocked_cyclic.reverse_blocked)} (reverse)."
+            )
 
-        blocked_with_loopless = _find_blocked_reactions_loopless(
-            model=model,
-            reaction_list=reactions_to_check,
-            loopless=loopless,
-            zero_cutoff=zero_cutoff,
-            processes=processes,
-            cyclic_reactions=cyclic_reactions,
-        )
+            blocked_non_cyclic = find_blocked_reactions(
+                model=model,
+                reaction_list=reaction_list,
+                zero_cutoff=zero_cutoff,
+                open_exchanges=open_exchanges,
+                processes=processes,
+            )
 
-        logger.info(
-            "Found blocked reactions among cyclic reactions with loopless constraints: "
-            f"{len(blocked_with_loopless.forward_blocked)} (forward), "
-            f"{len(blocked_with_loopless.reverse_blocked)} (reverse)."
-        )
+            logger.info(
+                "Found blocked reactions among non-cyclic reactions: "
+                f"{len(blocked_non_cyclic.forward_blocked)} (forward), "
+                f"{len(blocked_non_cyclic.reverse_blocked)} (reverse)."
+            )
 
-        blocked_without_constraints = find_blocked_reactions(
-            model=model,
-            reaction_list=reaction_list,
-            zero_cutoff=zero_cutoff,
-            open_exchanges=open_exchanges,
-            processes=processes,
-        )
-
+            return BlockedReactionsResult(
+                forward_blocked=blocked_non_cyclic.forward_blocked
+                + blocked_cyclic.forward_blocked,
+                reverse_blocked=blocked_non_cyclic.reverse_blocked
+                + blocked_cyclic.reverse_blocked,
+            )
+    finally:
         reset_mipgap_cb()
-
-        return BlockedReactionsResult(
-            forward_blocked=blocked_without_constraints.forward_blocked
-            + blocked_with_loopless.forward_blocked,
-            reverse_blocked=blocked_without_constraints.reverse_blocked
-            + blocked_with_loopless.reverse_blocked,
-        )
