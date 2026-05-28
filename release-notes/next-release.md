@@ -6,9 +6,10 @@
 
 ## Fixes
 
+
 ## Other
 
-
 ## Deprecated features
+
 
 ## Backwards incompatible changes
