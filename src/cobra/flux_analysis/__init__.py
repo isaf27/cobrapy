@@ -1,5 +1,6 @@
 """Provide functions related to Flux Analysis."""
 
+from .blocked import find_blocked_reactions
 from .deletion import (
     double_gene_deletion,
     double_reaction_deletion,
@@ -20,8 +21,4 @@ from .variability import (
     find_essential_genes,
     find_essential_reactions,
     flux_variability_analysis,
-)
-from .blocked import (
-    find_blocked_reactions,
-    find_blocked_reactions_loopless,
 )
