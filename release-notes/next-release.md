@@ -1,20 +1,22 @@
-# Release notes for cobrapy x.y.z
+# Release notes for cobrapy 0.33.0
 
 ## New features
 
-- Added `nullspace_fast_snp`, a new function that constructs sparse basis for the nullspace of a matrix using Fast-SNP algorithm.
-- Added Fast-SNP based method of adding loopless constraints to `add_loopless` and `flux_variability_analysis`.
-- Added `find_cyclic_reactions`, a new function that finds all reactions in a model that can be part of a cycle.
-- Optimized `flux_variability_analysis` by running MILP optimization only for reactions that can be a part of cycle (as identified by `find_cyclic_reactions`).
+- `flux_variability_analysis` gained an `all_fluxes` argument. FVA solves one optimization per reaction per direction and keeps only the objective value; setting this to `True` also returns the flux distribution found at each optimum, as a dict mapping `"minimum"`/`"maximum"` to data frames indexed by the optimized reaction. This avoids re-running an FVA-sized batch of solves when the distributions themselves are wanted, for example as a starting pool for sampling. With `loopless="fastSNP"` the loop constraints are applied to the whole model when this is set, so every returned distribution is loopless. The default return value is unchanged.
+
+- `Dictlists` (`model.reactions`, `model.genes`, `model.metabolites`) are now generic containers and the types of their contents are now inferable by python type checkers.
 
 ## Fixes
 
+- type-annotations on resetable properties fixed.
+- fixed the URL for the BIGG repository
+- fixed the URL for the BioModels repository
+- gene ids containing characters such as `@`, `+`, `*` or `#` are now parsed correctly in GPRs, so reactions using them can be copied (#1448)
+
 ## Other
 
-- Updated type hinting for the `DictList` class so that the type of `Object` contained by a `DictList` can be specified. For example, the hinted return type of `model.reactions.get_by_id` is now `Reaction` instead of `Object`.
+- Downloads from BioModels and BIGG now get xfail markers as they are often blocked
 
 ## Deprecated features
-
-- Changed the type of the `loopless` parameter in `flux_variability_analysis` from `bool` to `Optional[str]`. Using `loopless=False` or `loopless=True` (boolean) is now deprecated.
 
 ## Backwards incompatible changes

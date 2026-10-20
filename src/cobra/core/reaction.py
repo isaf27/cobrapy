@@ -3,7 +3,7 @@
 import hashlib
 import re
 from collections import defaultdict
-from copy import copy, deepcopy
+from copy import deepcopy
 from functools import partial
 from math import isclose, isinf
 from operator import attrgetter
@@ -245,33 +245,6 @@ class Reaction(Object):
             raise AttributeError("cannot assign objective to a missing model")
         if self.flux_expression is not None:
             set_objective(self.model, {self: value}, additive=True)
-
-    def __copy__(self) -> "Reaction":
-        """Copy the Reaction.
-
-        Returns
-        -------
-        Reaction
-            A new reaction that is a copy of the original reaction.
-        """
-        cop = copy(super(Reaction, self))
-        return cop
-
-    def __deepcopy__(self, memo: dict) -> "Reaction":
-        """Copy the reaction with memo.
-
-        Parameters
-        ----------
-        memo: dict
-            Automatically passed parameter.
-
-        Returns
-        -------
-        Reaction
-            A new reaction that is a deep copy of the original reaction with memo.
-        """
-        cop = deepcopy(super(Reaction, self), memo)
-        return cop
 
     @staticmethod
     def _check_bounds(lb: float, ub: float) -> None:

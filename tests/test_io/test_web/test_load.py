@@ -1,6 +1,7 @@
 """Test model loading from local and remote model repositores."""
 
 import gzip
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 from unittest.mock import Mock
@@ -9,6 +10,7 @@ import pytest
 
 from cobra import Configuration
 from cobra.io import BiGGModels, BioModels, load_model
+from cobra.io.web import biomodels_repository
 
 
 if TYPE_CHECKING:
@@ -40,6 +42,10 @@ def biomodels(mini_sbml: bytes, mocker: "MockerFixture") -> Mock:
     return result
 
 
+@pytest.mark.xfail(
+    condition="GITHUB_ACTIONS" in os.environ,
+    reason="BIGG often blocks Github Actions",
+)
 def test_bigg_access(bigg_models: Mock) -> None:
     """Test that SBML would be retrieved from the BiGG Models repository.
 
@@ -53,6 +59,10 @@ def test_bigg_access(bigg_models: Mock) -> None:
     bigg_models.get_sbml.assert_called_once_with(model_id="e_coli_core")
 
 
+@pytest.mark.xfail(
+    condition="GITHUB_ACTIONS" in os.environ,
+    reason="BioModels often blocks Github Actions",
+)
 def test_biomodels_access(biomodels: Mock) -> None:
     """Test that SBML would be retrieved from the BioModels repository.
 
@@ -72,6 +82,49 @@ def test_unknown_model() -> None:
         load_model("MODELWHO?", cache=False)
 
 
+@pytest.mark.parametrize(
+    "main_files",
+    [
+        pytest.param(
+            [{"name": "253_2019_9630_MOESM3_ESM.omex", "fileSize": "106359"}],
+            id="omex-only",
+        ),
+        pytest.param([], id="empty-listing"),
+    ],
+)
+def test_biomodels_without_sbml_document(
+    mocker: "MockerFixture", main_files: list
+) -> None:
+    """Expect a clear error when BioModels lists no SBML document.
+
+    Some models are deposited only as COMBINE (OMEX) archives, so the file
+    listing contains no ``.xml`` entry. The download must not be attempted,
+    because the archive bytes are not an SBML document and would surface much
+    later as a ``UnicodeDecodeError``.
+
+    Parameters
+    ----------
+    mocker : pytest_mock.MockerFixture
+        The mocking fixture.
+    main_files : list
+        The ``main`` section of the mocked BioModels files response.
+
+    """
+    response = mocker.Mock()
+    response.json.return_value = {"additional": [], "main": main_files}
+    mocker.patch.object(biomodels_repository.httpx, "get", return_value=response)
+    stream = mocker.patch.object(biomodels_repository.httpx, "stream")
+
+    with pytest.raises(RuntimeError, match="Could not find an SBML document"):
+        BioModels().get_sbml(model_id="BIOMD0000001089")
+
+    stream.assert_not_called()
+
+
+@pytest.mark.xfail(
+    condition="GITHUB_ACTIONS" in os.environ,
+    reason="BioModels/BIGG often blocks Github Actions",
+)
 @pytest.mark.parametrize(
     "model_id, num_metabolites, num_reactions",
     [("e_coli_core", 72, 95), ("BIOMD0000000633", 50, 35)],
@@ -94,6 +147,7 @@ def test_remote_load(model_id: str, num_metabolites: int, num_reactions: int) ->
     assert len(model.reactions) == num_reactions
 
 
+@pytest.mark.skip("caching currently removed because of a CVE in diskcache")
 def test_cache(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bigg_models: Mock, biomodels: Mock
 ) -> None:

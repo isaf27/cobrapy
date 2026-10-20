@@ -168,9 +168,7 @@ class Configuration(metaclass=Singleton):
 
         """
         self._cache_directory = pathlib.Path(path)
-        if not self._cache_directory.is_dir():
-            logger.debug(f"Creating cache directory '{str(self._cache_directory)}'.")
-            self._cache_directory.mkdir(parents=True)
+        self._cache_directory.mkdir(parents=True, exist_ok=True)
 
     def __repr__(self) -> str:
         """Return a string representation of the current configuration values."""
