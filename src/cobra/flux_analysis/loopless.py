@@ -11,310 +11,45 @@ from ..util import create_stoichiometric_matrix, nullspace
 from .fast_snp import nullspace_fast_snp
 from .find_cyclic_reactions import find_cyclic_reactions
 from .helpers import normalize_cutoff
+from .loopless_constraints import (
+    add_directional_indicators,
+    add_indicators,
+    add_nullspace_energies,
+    add_potential_energies,
+)
 
 
 if TYPE_CHECKING:
     from cobra import Model, Reaction, Solution
 
 
-def _add_loopless_with_nullspace(
-    model: "Model",
-    n_int: np.ndarray,
-    reactions_to_constrain: List[int],
-    max_bound: float,
-    zero_cutoff: float,
-):
-    """Add nullspace-based loopless constraints."""
-    prob = model.problem
+def _warn_about_integrality_tolerance(
+    model: "Model", flux_threshold: float, max_bound: float
+) -> None:
+    """Warn if inactive indicators may allow a flux close to `flux_threshold`."""
+    try:
+        integrality_tolerance = model.solver.configuration.tolerances.integrality
+    except AttributeError:
+        integrality_tolerance = None
 
-    # Add indicator variables and new constraints
-    to_add = []
-    for i, ridx in enumerate(reactions_to_constrain):
-        if not (np.abs(n_int[:, i]) > zero_cutoff).any():
-            continue
-
-        rxn = model.reactions[ridx]
-        # indicator variable a_i
-        indicator = prob.Variable(f"indicator_{rxn.id}", type="binary")
-        # lb_i * (1 - a_i) <= v_i <= ub_i * a_i
-        on_off_forward = prob.Constraint(
-            rxn.flux_expression - rxn.upper_bound * indicator,
-            ub=0,
-            name=f"on_off_forward_{rxn.id}",
+    if (
+        integrality_tolerance is None
+        or max_bound * integrality_tolerance >= flux_threshold * 0.5
+    ):
+        warn(
+            "Loopless constraints may not work properly "
+            f"with the provided `flux_threshold`={flux_threshold}, "
+            f"maximum model bound={max_bound}, and solver integrality "
+            f"tolerance={integrality_tolerance}. "
+            "This can happen due to numerical instability. "
+            "Possible remedies are increasing `flux_threshold`, "
+            "decreasing the maximum model bound, "
+            "switching to a different solver, "
+            "or decreasing the solver `integrality` tolerance. "
+            "Please carefully read the note on numerical instability "
+            "in the `add_loopless` function documentation.",
+            UserWarning,
         )
-        on_off_reverse = prob.Constraint(
-            rxn.flux_expression + rxn.lower_bound * indicator,
-            lb=rxn.lower_bound,
-            name=f"on_off_reverse_{rxn.id}",
-        )
-        # -(max_bound + 1) * a_i + 1 <= G_i <= -(max_bound + 1) * a_i + max_bound
-        delta_g = prob.Variable(f"delta_g_{rxn.id}")
-        delta_g_range = prob.Constraint(
-            delta_g + (max_bound + 1) * indicator,
-            lb=1,
-            ub=max_bound,
-            name=f"delta_g_range_{rxn.id}",
-        )
-        to_add.extend(
-            [indicator, on_off_forward, on_off_reverse, delta_g, delta_g_range]
-        )
-
-    model.add_cons_vars(to_add)
-
-    # Add nullspace constraints for G_i
-    for i, row in enumerate(n_int):
-        name = f"nullspace_constraint_{i}"
-        nullspace_constraint = prob.Constraint(Zero, lb=0, ub=0, name=name)
-        model.add_cons_vars([nullspace_constraint])
-        coefs = {
-            model.variables[f"delta_g_{model.reactions[ridx].id}"]: row[i]
-            for i, ridx in enumerate(reactions_to_constrain)
-            if abs(row[i]) > zero_cutoff
-        }
-        model.constraints[name].set_linear_coefficients(coefs)
-
-
-def _add_loopless_with_nullspace_directional(
-    model: "Model",
-    n_int: np.ndarray,
-    reactions_to_constrain: List[int],
-    flux_threshold: float,
-    max_bound: float,
-    zero_cutoff: float,
-):
-    """Add directional nullspace-based loopless constraints."""
-    prob = model.problem
-
-    # Add indicator variables and new constraints
-    to_add = []
-    for ridx in reactions_to_constrain:
-        rxn = model.reactions[ridx]
-
-        indicator_maximum = prob.Variable(f"indicator_maximum_{rxn.id}", type="binary")
-        indicator_minimum = prob.Variable(f"indicator_minimum_{rxn.id}", type="binary")
-
-        one_direction_constraint = prob.Constraint(
-            indicator_maximum + indicator_minimum,
-            ub=1,
-            name=f"single_nonzero_direction_{rxn.id}",
-        )
-
-        # eps * a_i+ <= v_i+ <= ub_i * a_i+
-        on_off_constraint_maximum1 = prob.Constraint(
-            rxn.forward_variable - rxn.upper_bound * indicator_maximum,
-            ub=0,
-            name=f"on_off_maximum1_{rxn.id}",
-        )
-        on_off_constraint_maximum2 = prob.Constraint(
-            rxn.forward_variable - flux_threshold * indicator_maximum,
-            lb=0,
-            name=f"on_off_maximum2_{rxn.id}",
-        )
-
-        # eps * a_i- <= v_i- <= -lb_i * a_i-
-        on_off_constraint_minimum1 = prob.Constraint(
-            rxn.reverse_variable + rxn.lower_bound * indicator_minimum,
-            ub=0,
-            name=f"on_off_minimum1_{rxn.id}",
-        )
-        on_off_constraint_minimum2 = prob.Constraint(
-            rxn.reverse_variable - flux_threshold * indicator_minimum,
-            lb=0,
-            name=f"on_off_minimum2_{rxn.id}",
-        )
-
-        to_add.extend(
-            [
-                indicator_maximum,
-                indicator_minimum,
-                one_direction_constraint,
-                on_off_constraint_maximum1,
-                on_off_constraint_maximum2,
-                on_off_constraint_minimum1,
-                on_off_constraint_minimum2,
-            ]
-        )
-
-        # a_i+ -> G_i <= -1: G_i <= -(max_bound + 1) * a_i+ + max_bound
-        delta_g = prob.Variable(f"delta_g_{rxn.id}")
-        delta_g_range_maximum = prob.Constraint(
-            delta_g + (max_bound + 1) * indicator_maximum,
-            ub=max_bound,
-            name=f"delta_g_range_maximum_{rxn.id}",
-        )
-
-        # a_i- -> G_i >= 1: G_i >= (max_bound + 1) * a_i- - max_bound
-        delta_g_range_minimum = prob.Constraint(
-            delta_g - (max_bound + 1) * indicator_minimum,
-            lb=-max_bound,
-            name=f"delta_g_range_minimum_{rxn.id}",
-        )
-
-        to_add.extend([delta_g, delta_g_range_maximum, delta_g_range_minimum])
-
-    model.add_cons_vars(to_add)
-
-    # Add nullspace constraints for G_i
-    for i, row in enumerate(n_int):
-        name = f"nullspace_constraint_{i}"
-        nullspace_constraint = prob.Constraint(Zero, lb=0, ub=0, name=name)
-        model.add_cons_vars([nullspace_constraint])
-        coefs = {
-            model.variables[f"delta_g_{model.reactions[ridx].id}"]: row[i]
-            for i, ridx in enumerate(reactions_to_constrain)
-            if abs(row[i]) > zero_cutoff
-        }
-        model.constraints[name].set_linear_coefficients(coefs)
-
-
-def _add_loopless_with_potentials(
-    model: "Model",
-    s_int: np.ndarray,
-    reactions_to_constrain: List[int],
-    max_bound: float,
-    zero_cutoff: float,
-):
-    """Add loopless constraints using metabolite potential variables."""
-    prob = model.problem
-
-    # Add indicator variables and new constraints
-    to_add = []
-    for i in range(s_int.shape[0]):
-        to_add.append(prob.Variable(f"potential_{i}"))
-
-    for ridx in reactions_to_constrain:
-        rxn = model.reactions[ridx]
-        # indicator variable a_i
-        indicator = prob.Variable(f"indicator_{rxn.id}", type="binary")
-        # lb_i * (1 - a_i) <= v_i <= ub_i * a_i
-        on_off_forward = prob.Constraint(
-            rxn.flux_expression - rxn.upper_bound * indicator,
-            ub=0,
-            name=f"on_off_forward_{rxn.id}",
-        )
-        on_off_reverse = prob.Constraint(
-            rxn.flux_expression + rxn.lower_bound * indicator,
-            lb=rxn.lower_bound,
-            name=f"on_off_reverse_{rxn.id}",
-        )
-        to_add.extend([indicator, on_off_forward, on_off_reverse])
-
-    model.add_cons_vars(to_add)
-
-    for i, ridx in enumerate(reactions_to_constrain):
-        rxn = model.reactions[ridx]
-        col = s_int[:, i]
-
-        name = f"delta_g_range_{i}"
-        delta_g_range = prob.Constraint(Zero, lb=1, ub=max_bound, name=name)
-        model.add_cons_vars([delta_g_range])
-
-        coefs = {
-            model.variables[f"potential_{i}"]: col[i]
-            for i in range(s_int.shape[0])
-            if abs(col[i]) > zero_cutoff
-        }
-        coefs[model.variables[f"indicator_{rxn.id}"]] = max_bound + 1
-        model.constraints[name].set_linear_coefficients(coefs)
-
-
-def _add_loopless_with_potentials_directional(
-    model: "Model",
-    s_int: np.ndarray,
-    reactions_to_constrain: List[int],
-    flux_threshold: float,
-    max_bound: float,
-    zero_cutoff: float,
-):
-    """Add directional loopless constraints using metabolite potential variables."""
-    prob = model.problem
-
-    # Add potential and indicator variables
-    to_add = []
-    for i in range(s_int.shape[0]):
-        to_add.append(prob.Variable(f"potential_{i}"))
-
-    for ridx in reactions_to_constrain:
-        rxn = model.reactions[ridx]
-
-        indicator_maximum = prob.Variable(f"indicator_maximum_{rxn.id}", type="binary")
-        indicator_minimum = prob.Variable(f"indicator_minimum_{rxn.id}", type="binary")
-
-        one_direction_constraint = prob.Constraint(
-            indicator_maximum + indicator_minimum,
-            ub=1,
-            name=f"single_nonzero_direction_{rxn.id}",
-        )
-
-        # eps * a_i+ <= v_i+ <= ub_i * a_i+
-        on_off_constraint_maximum1 = prob.Constraint(
-            rxn.forward_variable - rxn.upper_bound * indicator_maximum,
-            ub=0,
-            name=f"on_off_maximum1_{rxn.id}",
-        )
-        on_off_constraint_maximum2 = prob.Constraint(
-            rxn.forward_variable - flux_threshold * indicator_maximum,
-            lb=0,
-            name=f"on_off_maximum2_{rxn.id}",
-        )
-
-        # eps * a_i- <= v_i- <= -lb_i * a_i-
-        on_off_constraint_minimum1 = prob.Constraint(
-            rxn.reverse_variable + rxn.lower_bound * indicator_minimum,
-            ub=0,
-            name=f"on_off_minimum1_{rxn.id}",
-        )
-        on_off_constraint_minimum2 = prob.Constraint(
-            rxn.reverse_variable - flux_threshold * indicator_minimum,
-            lb=0,
-            name=f"on_off_minimum2_{rxn.id}",
-        )
-
-        to_add.extend(
-            [
-                indicator_maximum,
-                indicator_minimum,
-                one_direction_constraint,
-                on_off_constraint_maximum1,
-                on_off_constraint_maximum2,
-                on_off_constraint_minimum1,
-                on_off_constraint_minimum2,
-            ]
-        )
-
-    model.add_cons_vars(to_add)
-
-    for i, ridx in enumerate(reactions_to_constrain):
-        rxn = model.reactions[ridx]
-        col = s_int[:, i]
-
-        # a_i+ -> G_i <= -1: G_i <= -(max_bound + 1) * a_i+ + max_bound
-        name_maximum = f"delta_g_range_maximum_{rxn.id}"
-        delta_g_range_maximum = prob.Constraint(
-            Zero,
-            ub=max_bound,
-            name=name_maximum,
-        )
-        # a_i- -> G_i >= 1: G_i >= (max_bound + 1) * a_i- - max_bound
-        name_minimum = f"delta_g_range_minimum_{rxn.id}"
-        delta_g_range_minimum = prob.Constraint(
-            Zero,
-            lb=-max_bound,
-            name=name_minimum,
-        )
-        model.add_cons_vars([delta_g_range_maximum, delta_g_range_minimum])
-
-        coefs = {
-            model.variables[f"potential_{j}"]: col[j]
-            for j in range(s_int.shape[0])
-            if abs(col[j]) > zero_cutoff
-        }
-        coefs[model.variables[f"indicator_maximum_{rxn.id}"]] = max_bound + 1
-        model.constraints[name_maximum].set_linear_coefficients(coefs)
-
-        coefs.pop(model.variables[f"indicator_maximum_{rxn.id}"])
-        coefs[model.variables[f"indicator_minimum_{rxn.id}"]] = -(max_bound + 1)
-        model.constraints[name_minimum].set_linear_coefficients(coefs)
 
 
 def add_loopless(
@@ -411,54 +146,16 @@ def add_loopless(
 
     s_int = create_stoichiometric_matrix(model)[:, np.array(reactions_to_constrain)]
     s_int = s_int[np.sum(np.abs(s_int) > zero_cutoff, -1) > 0, :]
+    constrained_reactions = [model.reactions[i] for i in reactions_to_constrain]
 
     max_bound = max(1000.0, max(max(abs(b) for b in r.bounds) for r in model.reactions))
 
     if flux_threshold is not None:
-        try:
-            integrality_tolerance = model.solver.configuration.tolerances.integrality
-        except AttributeError:
-            integrality_tolerance = None
-
-        if (
-            integrality_tolerance is None
-            or max_bound * integrality_tolerance >= flux_threshold * 0.5
-        ):
-            warn(
-                "Loopless constraints may not work properly "
-                f"with the provided `flux_threshold`={flux_threshold}, "
-                f"maximum model bound={max_bound}, and solver integrality "
-                f"tolerance={integrality_tolerance}. "
-                "This can happen due to numerical instability. "
-                "Possible remedies are increasing `flux_threshold`, "
-                "decreasing the maximum model bound, "
-                "switching to a different solver, "
-                "or decreasing the solver `integrality` tolerance. "
-                "Please carefully read the note on numerical instability "
-                "in the `add_loopless` function documentation.",
-                UserWarning,
-            )
+        _warn_about_integrality_tolerance(model, flux_threshold, max_bound)
 
     if method == "potentials":
-        if flux_threshold is not None:
-            _add_loopless_with_potentials_directional(
-                model,
-                s_int,
-                reactions_to_constrain,
-                flux_threshold,
-                max_bound,
-                zero_cutoff,
-            )
-        else:
-            _add_loopless_with_potentials(
-                model,
-                s_int,
-                reactions_to_constrain,
-                max_bound,
-                zero_cutoff,
-            )
-
-    elif method in ["original", "fastSNP"]:
+        energies = add_potential_energies(model, s_int, zero_cutoff)
+    else:
         if method == "original":
             n_int = nullspace(s_int).T
         else:
@@ -472,27 +169,23 @@ def add_loopless(
                 directions_int,
                 zero_cutoff=zero_cutoff,
             ).T
+        if flux_threshold is None:
+            # Reactions outside of the nullspace cannot be part of a loop.
+            in_nullspace = (np.abs(n_int) > zero_cutoff).any(axis=0)
+            n_int = n_int[:, in_nullspace]
+            constrained_reactions = [
+                rxn for rxn, keep in zip(constrained_reactions, in_nullspace) if keep
+            ]
+        energies = add_nullspace_energies(
+            model, constrained_reactions, n_int, zero_cutoff
+        )
 
-        if flux_threshold is not None:
-            _add_loopless_with_nullspace_directional(
-                model,
-                n_int,
-                reactions_to_constrain,
-                flux_threshold,
-                max_bound,
-                zero_cutoff,
-            )
-        else:
-            _add_loopless_with_nullspace(
-                model,
-                n_int,
-                reactions_to_constrain,
-                max_bound,
-                zero_cutoff,
-            )
-
+    if flux_threshold is None:
+        add_indicators(model, constrained_reactions, energies, max_bound)
     else:
-        raise ValueError(f"unsupported method: {method}")
+        add_directional_indicators(
+            model, constrained_reactions, energies, max_bound, flux_threshold
+        )
 
 
 def _add_cycle_free(model: "Model", fluxes: Dict[str, float]) -> None:

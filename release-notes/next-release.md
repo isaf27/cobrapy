@@ -6,6 +6,10 @@
 - `pfba` and `geometric_fba` gained a `raise_error` argument that is forwarded to the underlying solver-status check, so all FBA flavours can be invoked like `Model.optimize(raise_error=...)`. As with `Model.optimize`, a non-optimal status now emits a warning by default and only raises when `raise_error=True` (previously `pfba` always raised).
 - `flux_variability_analysis` gained an `all_fluxes` argument. FVA solves one optimization per reaction per direction and keeps only the objective value; setting this to `True` also returns the flux distribution found at each optimum, as a dict mapping `"minimum"`/`"maximum"` to data frames indexed by the optimized reaction. This avoids re-running an FVA-sized batch of solves when the distributions themselves are wanted, for example as a starting pool for sampling. With `loopless="fastSNP"` the loop constraints are applied to the whole model when this is set, so every returned distribution is loopless. The default return value is unchanged.
 - `Dictlists` (`model.reactions`, `model.genes`, `model.metabolites`) are now generic containers and the types of their contents are now inferable by python type checkers.
+- `add_loopless` gained `method="potentials"`, which formulates the loopless constraints with metabolite potentials instead of a nullspace basis, and a `flux_threshold` argument that adds one indicator per reaction direction. `flux_variability_analysis` accepts `loopless="potentials"`.
+- `flux_variability_analysis` gained an `abs_flux_clip` argument that clips the reported bounds, which avoids optimizing reactions beyond that value, accepts `fraction_of_optimum=None` to leave the objective unconstrained, and accepts `(reaction, direction)` tuples in `reaction_list` to compute only one bound of a reaction.
+- `find_blocked_reactions` gained a `loopless` argument to find the reactions that cannot carry flux in any loopless flux distribution. Its result still behaves as a list of the blocked reactions and additionally has the attributes `forward_blocked` and `reverse_blocked`.
+- `cobra.manipulation.clip_reaction_bounds` clips all reaction bounds to a maximal absolute value.
 
 ## Fixes
 
@@ -24,3 +28,5 @@
 ## Deprecated features
 
 ## Backwards incompatible changes
+
+- `find_blocked_reactions` moved from `cobra.flux_analysis.variability` to `cobra.flux_analysis.blocked`. Importing it from `cobra.flux_analysis` works as before.

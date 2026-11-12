@@ -1,20 +1,24 @@
 """Provide variability based methods such as flux variability or gene essentiality."""
 
 import logging
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
 from warnings import warn
 
 import numpy as np
-import optlang
 import pandas as pd
-from optlang.symbolics import Zero, add
+from optlang.symbolics import Zero
 
 from ..core import Configuration, get_solution
 from ..util import ProcessPool
 from ..util import solver as sutil
 from .deletion import single_gene_deletion, single_reaction_deletion
 from .find_cyclic_reactions import find_cyclic_reactions
-from .loopless import add_loopless, loopless_fva_iter
+from .loopless import loopless_fva_iter
+from .loopless_fva import (
+    ClippedFluxScreening,
+    create_loopless_model,
+    requires_loopless_for_all,
+)
 from .parsimonious import add_pfba
 
 
@@ -24,164 +28,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 configuration = Configuration()
-
-
-def _requires_loopless_for_all(
-    model: "Model",
-    cyclic_reactions: List[str],
-    cyclic_directions: List[Tuple[bool, bool]],
-) -> bool:
-    """Check whether cycle removal may violate the model's constraints.
-
-    Removing a cycle decreases forward or reverse reaction variables while
-    leaving other variables unchanged. Standard stoichiometric constraints are
-    preserved. For other linear constraints, decreasing a variable must not
-    decrease a lower-bounded expression or increase an upper-bounded one.
-
-    This is a sufficient test for using LP for non-cyclic target directions,
-    not a test of whether their optima actually change. Unsupported constraint
-    types conservatively require loopless constraints for every target.
-    """
-    variables = model.variables
-    cyclic_variables = set()
-    for reaction_id, directions in zip(cyclic_reactions, cyclic_directions):
-        reaction = model.reactions.get_by_id(reaction_id)
-        for variable, cyclic in zip(
-            (variables[reaction.reverse_id], variables[reaction.id]), directions
-        ):
-            if not cyclic:
-                continue
-            if variable.type != "continuous" or (
-                variable.lb is not None and variable.lb > 0
-            ):
-                return True
-            cyclic_variables.add(variable)
-
-    if not cyclic_variables:
-        return False
-
-    for constraint in model.constraints:
-        if constraint.indicator_variable is not None or not constraint.is_Linear:
-            return True
-        coefficients = constraint.get_linear_coefficients(constraint.variables)
-        affected = cyclic_variables.intersection(coefficients)
-        if not affected:
-            continue
-
-        # Recognize actual mass-balance rows, not just their names: users may
-        # have modified a metabolite constraint through the solver interface.
-        if constraint.name in model.metabolites:
-            metabolite = model.metabolites.get_by_id(constraint.name)
-            expected = {}
-            for reaction in metabolite.reactions:
-                coefficient = reaction.get_coefficient(metabolite)
-                expected[variables[reaction.id]] = coefficient
-                expected[variables[reaction.reverse_id]] = -coefficient
-            if coefficients == expected:
-                continue
-
-        for variable in affected:
-            coefficient = coefficients[variable]
-            if (constraint.lb is not None and coefficient > 0) or (
-                constraint.ub is not None and coefficient < 0
-            ):
-                return True
-
-    return False
-
-
-def _add_loopless_fva_objective_bounds(
-    model: "Model",
-    loopless_model: "Model",
-    fraction_of_optimum: Optional[float],
-    pfba_factor: Optional[float],
-) -> None:
-    """Compute loopless reference values and add the same bounds to both models.
-
-    The original objective is constrained before minimizing the total flux.
-    Only reaction variables enter the flux sum. Loopless auxiliary variables
-    are excluded. If both arguments refer to the same model, add each bound
-    only once.
-    """
-    models = [model] if model is loopless_model else [model, loopless_model]
-    if fraction_of_optimum is not None:
-        optimum = loopless_model.slim_optimize(
-            error_value=None,
-            message="There is no optimal solution for the chosen loopless objective!",
-        )
-        for target in models:
-            bound = fraction_of_optimum * optimum
-            maximize = target.objective.direction == "max"
-            target.add_cons_vars(
-                [
-                    target.problem.Constraint(
-                        target.objective.expression,
-                        lb=bound if maximize else None,
-                        ub=None if maximize else bound,
-                        name="fva_old_objective_constraint",
-                    )
-                ]
-            )
-
-    if pfba_factor is not None:
-        if pfba_factor < 1.0:
-            warn("The 'pfba_factor' should be larger or equal to 1.", UserWarning)
-        with loopless_model:
-            flux_sum = add(
-                [
-                    variable
-                    for reaction in loopless_model.reactions
-                    for variable in (
-                        reaction.forward_variable,
-                        reaction.reverse_variable,
-                    )
-                ]
-            )
-            loopless_model.objective = loopless_model.problem.Objective(
-                flux_sum, direction="min"
-            )
-            minimum_sum = loopless_model.slim_optimize(error_value=None)
-        for target in models:
-            flux_sum = add(
-                [
-                    variable
-                    for reaction in target.reactions
-                    for variable in (
-                        reaction.forward_variable,
-                        reaction.reverse_variable,
-                    )
-                ]
-            )
-            target.add_cons_vars(
-                [
-                    target.problem.Constraint(
-                        flux_sum,
-                        ub=pfba_factor * minimum_sum,
-                        name="flux_sum_constraint",
-                    )
-                ]
-            )
-
-
-def _set_mipgap(model: "Model", mipgap: float) -> Callable[[], None]:
-    """Set MIP gap for the solver."""
-    cplex_interface = getattr(optlang, "cplex_interface", None)
-    gurobi_interface = getattr(optlang, "gurobi_interface", None)
-    old_mipgap = None
-    if model.problem == cplex_interface:
-        old_mipgap = model.solver.problem.parameters.mip.tolerances.mipgap.get()
-        model.solver.problem.parameters.mip.tolerances.mipgap.set(mipgap)
-    elif model.problem == gurobi_interface:
-        old_mipgap = model.solver.problem.Params.MIPGap
-        model.solver.problem.Params.MIPGap = mipgap
-
-    def reset_mipgap() -> None:
-        if model.problem == cplex_interface:
-            model.solver.problem.parameters.mip.tolerances.mipgap.set(old_mipgap)
-        elif model.problem == gurobi_interface:
-            model.solver.problem.Params.MIPGap = old_mipgap
-
-    return reset_mipgap
 
 
 def _init_abs_flux_clip_target(abs_flux_clip: Optional[float], sense: str) -> None:
@@ -346,51 +192,151 @@ def _fva_step(reaction_id: str) -> Tuple[str, float, Optional[pd.Series]]:
     return reaction_id, value, fluxes
 
 
-def _validate_loopless_fva_clipped_reactions(
+def _parse_reaction_requests(
     model: "Model",
-    validation_model: "Model",
-    reaction_list: List[Tuple[str, str]],
-    abs_flux_clip: float,
+    reaction_list: Optional[
+        List[Union["Reaction", str, Tuple[Union["Reaction", str], str]]]
+    ],
+) -> Tuple[List[str], Dict[str, List[str]]]:
+    """Return the requested reaction IDs and the reactions requested per bound."""
+    if reaction_list is None:
+        reaction_ids = [r.id for r in model.reactions]
+        return reaction_ids, {"minimum": reaction_ids, "maximum": reaction_ids}
+
+    aliases = {"min": "minimum", "max": "maximum"}
+    reaction_ids = []
+    requested = {"minimum": set(), "maximum": set()}
+    for entry in reaction_list:
+        directions = ("minimum", "maximum")
+        if isinstance(entry, tuple):
+            entry, direction = entry
+            direction = aliases.get(direction.lower(), direction.lower())
+            if direction not in requested:
+                raise ValueError(
+                    "Directional reaction requests must use 'min', 'max', "
+                    "'minimum' or 'maximum'."
+                )
+            directions = (direction,)
+        reaction_id = model.reactions.get_by_any([entry])[0].id
+        if reaction_id not in requested["minimum"] | requested["maximum"]:
+            reaction_ids.append(reaction_id)
+        for direction in directions:
+            requested[direction].add(reaction_id)
+    return reaction_ids, {
+        direction: [rxn_id for rxn_id in reaction_ids if rxn_id in ids]
+        for direction, ids in requested.items()
+    }
+
+
+def _split_cyclic_requests(
+    requested: Dict[str, List[str]],
     cyclic_reactions: List[str],
-    processes: Optional[int],
-    all_fluxes: bool = False,
-) -> Dict[str, Dict[str, Optional[pd.Series]]]:
-    """Confirm that reactions can reach ``abs_flux_clip`` with fixed directions.
+    cyclic_directions: List[Tuple[bool, bool]],
+) -> List[Dict[str, List[str]]]:
+    """Split the requested bounds into those of non-cyclic and cyclic directions."""
+    cyclic = {
+        "minimum": {
+            rxn_id
+            for rxn_id, (negative, _) in zip(cyclic_reactions, cyclic_directions)
+            if negative
+        },
+        "maximum": {
+            rxn_id
+            for rxn_id, (_, positive) in zip(cyclic_reactions, cyclic_directions)
+            if positive
+        },
+    }
+    return [
+        {
+            direction: [rxn_id for rxn_id in ids if rxn_id not in cyclic[direction]]
+            for direction, ids in requested.items()
+        },
+        {
+            direction: [rxn_id for rxn_id in ids if rxn_id in cyclic[direction]]
+            for direction, ids in requested.items()
+        },
+    ]
 
-    The fixed reaction directions are selected by the current loopless solution,
-    with all inactive directions fixed to zero before FVA. Each validated
-    reaction is mapped to its flux distribution if requested, otherwise None.
-    """
-    with validation_model:
-        for rxn_id in cyclic_reactions:
-            rxn = validation_model.reactions.get_by_id(rxn_id)
-            max_indicator = model.variables[f"indicator_maximum_{rxn_id}"].primal
-            if max_indicator < 0.5:
-                rxn.upper_bound = 0.0
-            min_indicator = model.variables[f"indicator_minimum_{rxn_id}"].primal
-            if min_indicator < 0.5:
-                rxn.lower_bound = 0.0
 
-        fva_result = flux_variability_analysis(
-            model=validation_model,
-            reaction_list=reaction_list,
-            fraction_of_optimum=None,
-            abs_flux_clip=abs_flux_clip,
-            processes=processes,
-            all_fluxes=all_fluxes,
+def _add_objective_bounds(
+    model: "Model", fraction_of_optimum: Optional[float], pfba_factor: Optional[float]
+) -> None:
+    """Constrain the objective and the total flux to stay close to their optima."""
+    prob = model.problem
+    if fraction_of_optimum is not None:
+        # Safety check before setting up FVA.
+        model.slim_optimize(
+            error_value=None,
+            message="There is no optimal solution for the chosen objective!",
         )
+        # Add the previous objective as a variable to the model then set it to
+        # zero. This also uses the fraction to create the lower/upper bound for
+        # the old objective.
+        # TODO: Use utility function here (fix_objective_as_constraint)?
+        if model.solver.objective.direction == "max":
+            fva_old_objective = prob.Variable(
+                "fva_old_objective",
+                lb=fraction_of_optimum * model.solver.objective.value,
+            )
+        else:
+            fva_old_objective = prob.Variable(
+                "fva_old_objective",
+                ub=fraction_of_optimum * model.solver.objective.value,
+            )
+        fva_old_obj_constraint = prob.Constraint(
+            model.solver.objective.expression - fva_old_objective,
+            lb=0,
+            ub=0,
+            name="fva_old_objective_constraint",
+        )
+        model.add_cons_vars([fva_old_objective, fva_old_obj_constraint])
 
-    if all_fluxes:
-        bounds, fluxes = fva_result
-    else:
-        bounds = fva_result
+    if pfba_factor is not None:
+        if pfba_factor < 1.0:
+            warn(
+                "The 'pfba_factor' should be larger or equal to 1.",
+                UserWarning,
+            )
+        with model:
+            add_pfba(model, fraction_of_optimum=0)
+            ub = model.slim_optimize(error_value=None)
+            flux_sum = prob.Variable("flux_sum", ub=pfba_factor * ub)
+            flux_sum_constraint = prob.Constraint(
+                model.solver.objective.expression - flux_sum,
+                lb=0,
+                ub=0,
+                name="flux_sum_constraint",
+            )
+        model.add_cons_vars([flux_sum, flux_sum_constraint])
 
-    result = {"minimum": {}, "maximum": {}}
-    for rxn_id, dir in reaction_list:
-        if abs(bounds.at[rxn_id, dir]) >= abs_flux_clip - model.tolerance:
-            result[dir][rxn_id] = fluxes[dir].loc[rxn_id] if all_fluxes else None
 
-    return result
+def _optimize_reactions(
+    model: "Model",
+    reaction_ids: List[str],
+    sense: str,
+    cycle_free_flux: bool,
+    abs_flux_clip: Optional[float],
+    processes: int,
+    all_fluxes: bool,
+) -> List[Tuple[str, float, Optional[pd.Series]]]:
+    """Minimize or maximize the flux of each reaction, in parallel if requested."""
+    if not reaction_ids:
+        return []
+    initargs = (model, cycle_free_flux, sense, abs_flux_clip, all_fluxes)
+    processes = min(processes, len(reaction_ids))
+    if processes > 1:
+        # We create and destroy a new pool here in order to set the
+        # objective direction for all reactions. This creates a
+        # slight overhead but seems the most clean.
+        chunk_size = len(reaction_ids) // processes
+        with ProcessPool(
+            processes, initializer=_init_worker, initargs=initargs
+        ) as pool:
+            return list(
+                pool.imap_unordered(_fva_step, reaction_ids, chunksize=chunk_size)
+            )
+    _init_worker(*initargs)
+    return list(map(_fva_step, reaction_ids))
 
 
 def _find_loopless_fva_clipped_reactions(
@@ -408,105 +354,51 @@ def _find_loopless_fva_clipped_reactions(
     ``abs_flux_clip``. If requested, keep the validating flux distributions so
     these reactions do not need to be optimized again.
     """
-    number_of_reactions = sum(len(ids) for ids in reactions_by_direction.values())
+    targets = [
+        (reaction_id, direction)
+        for direction in ("minimum", "maximum")
+        for reaction_id in reactions_by_direction[direction]
+    ]
     logger.info(
         f"Finding reactions with absolute loopless flux "
-        f"at least {abs_flux_clip} among {number_of_reactions} reactions."
+        f"at least {abs_flux_clip} among {len(targets)} reactions."
     )
 
-    result = {
-        "minimum": {},
-        "maximum": {},
-    }
-
+    result = {"minimum": {}, "maximum": {}}
     with model:
         validation_model = model.copy()
-        reset_mipgap_cb = _set_mipgap(model, mipgap=1.0)
         try:
-            add_loopless(
-                model,
-                method=loopless,
-                reactions=cyclic_reactions,
-                flux_threshold=abs_flux_clip,
+            screening = ClippedFluxScreening(
+                model, loopless, cyclic_reactions, targets, abs_flux_clip
             )
-
-            candidates_by_direction = {
-                "minimum": set(reactions_by_direction["minimum"]),
-                "maximum": set(reactions_by_direction["maximum"]),
-            }
-            reaction_list = [
-                (rxn_id, dir)
-                for dir in ("minimum", "maximum")
-                for rxn_id in reactions_by_direction[dir]
-            ]
-
-            model.objective = Zero
-            coefs = {
-                model.variables[f"indicator_{dir}_{rxn_id}"]: 1
-                for rxn_id, dir in reaction_list
-            }
-            model.objective.set_linear_coefficients(coefs)
-            model.objective.direction = "max"
-
-            remaining_candidate_constraint_name = (
-                "loopless_fva_at_least_one_remaining_candidate"
-            )
-            remaining_candidate_constraint = model.problem.Constraint(
-                Zero,
-                lb=1,
-                name=remaining_candidate_constraint_name,
-            )
-            model.add_cons_vars([remaining_candidate_constraint])
-            remaining_candidate_constraint = model.constraints[
-                remaining_candidate_constraint_name
-            ]
-            remaining_candidate_constraint.set_linear_coefficients(coefs)
-
-            while (
-                len(candidates_by_direction["maximum"]) > 0
-                or len(candidates_by_direction["minimum"]) > 0
-            ):
-                model.slim_optimize()
-                if model.solver.status == optlang.interface.INFEASIBLE:
+            while True:
+                candidates = screening.next_candidates()
+                if not candidates:
                     break
-                sutil.check_solver_status(model.solver.status)
-
-                remove_coef = {}
-                candidate_reactions_to_validate = []
-                for rxn_id, dir in reaction_list:
-                    if rxn_id in candidates_by_direction[dir]:
-                        indicator = model.variables[f"indicator_{dir}_{rxn_id}"]
-                        if indicator.primal >= 0.5:
-                            candidates_by_direction[dir].remove(rxn_id)
-                            remove_coef[indicator] = 0
-                            candidate_reactions_to_validate.append((rxn_id, dir))
-
-                if len(remove_coef) == 0:
-                    break
-
-                validated_reactions = _validate_loopless_fva_clipped_reactions(
-                    model=model,
-                    validation_model=validation_model,
-                    reaction_list=candidate_reactions_to_validate,
-                    abs_flux_clip=abs_flux_clip,
-                    cyclic_reactions=cyclic_reactions,
-                    processes=processes,
-                    all_fluxes=all_fluxes,
-                )
-                result["minimum"].update(validated_reactions["minimum"])
-                result["maximum"].update(validated_reactions["maximum"])
-
-                model.objective.set_linear_coefficients(remove_coef)
-                remaining_candidate_constraint.set_linear_coefficients(remove_coef)
-
+                with validation_model:
+                    screening.fix_inactive_directions(validation_model)
+                    bounds = flux_variability_analysis(
+                        model=validation_model,
+                        reaction_list=candidates,
+                        fraction_of_optimum=None,
+                        abs_flux_clip=abs_flux_clip,
+                        processes=processes,
+                        all_fluxes=all_fluxes,
+                    )
+                if all_fluxes:
+                    bounds, fluxes = bounds
+                for reaction_id, direction in candidates:
+                    bound = bounds.at[reaction_id, direction]
+                    if abs(bound) >= abs_flux_clip - model.tolerance:
+                        result[direction][reaction_id] = (
+                            fluxes[direction].loc[reaction_id] if all_fluxes else None
+                        )
         except Exception:
             logger.warning(
                 "Could not precompute all clipped loopless FVA reactions. "
                 "Returning clipped reactions found so far.",
                 exc_info=True,
             )
-        finally:
-            reset_mipgap_cb()
 
     logger.info(
         f"Found {len(result['minimum']) + len(result['maximum'])} reactions "
@@ -665,43 +557,7 @@ def flux_variability_analysis(
                 "The `abs_flux_clip` argument must be bigger than `model.tolerance`."
             )
 
-    if reaction_list is None:
-        reaction_ids = [r.id for r in model.reactions]
-        requested_by_direction = {
-            "minimum": set(reaction_ids),
-            "maximum": set(reaction_ids),
-        }
-    else:
-        requested_by_direction = {"minimum": set(), "maximum": set()}
-        reaction_ids = []
-        reaction_ids_set = set()
-
-        def _add_reaction_request(
-            reaction: Union["Reaction", str], directions: Tuple[str, ...]
-        ) -> None:
-            rxn = model.reactions.get_by_any([reaction])[0]
-            if rxn.id not in reaction_ids_set:
-                reaction_ids.append(rxn.id)
-                reaction_ids_set.add(rxn.id)
-            for direction in directions:
-                requested_by_direction[direction].add(rxn.id)
-
-        for reaction_entry in reaction_list:
-            if isinstance(reaction_entry, tuple):
-                reaction, direction = reaction_entry
-                direction = direction.lower()
-                if direction == "min":
-                    direction = "minimum"
-                elif direction == "max":
-                    direction = "maximum"
-                if direction not in ("minimum", "maximum"):
-                    raise ValueError(
-                        "Directional reaction requests must use 'min', 'max', "
-                        "'minimum' or 'maximum'."
-                    )
-                _add_reaction_request(reaction, (direction,))
-            else:
-                _add_reaction_request(reaction_entry, ("minimum", "maximum"))
+    reaction_ids, requested = _parse_reaction_requests(model, reaction_list)
 
     if processes is None:
         processes = configuration.processes
@@ -716,117 +572,31 @@ def flux_variability_analysis(
         },
         index=reaction_ids,
     )
-
-    reaction_ids_by_type = [
-        {
-            "minimum": [],
-            "maximum": [],
-        },
-        {
-            "minimum": [],
-            "maximum": [],
-        },
-    ]
-    if loopless is not None:
-        cyclic_reactions, cyclic_directions = find_cyclic_reactions(model)
-        cyclic_reaction_index = {rxn_id: i for i, rxn_id in enumerate(cyclic_reactions)}
-        for rxn_id in reaction_ids:
-            i = cyclic_reaction_index.get(rxn_id)
-            for loc, dir in enumerate(("minimum", "maximum")):
-                if rxn_id not in requested_by_direction[dir]:
-                    continue
-                if i is not None and cyclic_directions[i][loc]:
-                    reaction_ids_by_type[1][dir].append(rxn_id)
-                else:
-                    reaction_ids_by_type[0][dir].append(rxn_id)
-    else:
-        for dir in ("minimum", "maximum"):
-            reaction_ids_by_type[0][dir] = [
-                rxn_id
-                for rxn_id in reaction_ids
-                if rxn_id in requested_by_direction[dir]
-            ]
-
     flux_rows: Dict[str, Dict[str, pd.Series]] = {"minimum": {}, "maximum": {}}
 
+    cyclic_reactions, cyclic_directions = [], []
+    if loopless is not None:
+        cyclic_reactions, cyclic_directions = find_cyclic_reactions(model)
+    reaction_ids_by_type = _split_cyclic_requests(
+        requested, cyclic_reactions, cyclic_directions
+    )
+
     use_loopless_constraints = loopless in ("fastSNP", "potentials")
-    prob = model.problem
     with model:
         loopless_model = model
         if use_loopless_constraints:
-            if cyclic_reactions:
-                loopless_model = model.copy()
-                add_loopless(
-                    loopless_model, method=loopless, reactions=cyclic_reactions
-                )
-            _add_loopless_fva_objective_bounds(
-                model, loopless_model, fraction_of_optimum, pfba_factor
+            loopless_model = create_loopless_model(
+                model, loopless, cyclic_reactions, fraction_of_optimum, pfba_factor
             )
-
             # Screening has indicators only for cyclic reactions, even when
             # additional constraints require MILP for non-cyclic targets too.
-            cyclic_targets = {
-                direction: ids.copy()
-                for direction, ids in reaction_ids_by_type[1].items()
-            }
-            if all_fluxes or _requires_loopless_for_all(
+            cyclic_targets = reaction_ids_by_type[1]
+            if all_fluxes or requires_loopless_for_all(
                 model, cyclic_reactions, cyclic_directions
             ):
-                for direction in ("minimum", "maximum"):
-                    reaction_ids_by_type[1][direction] = [
-                        reaction_id
-                        for reaction_id in reaction_ids
-                        if reaction_id in requested_by_direction[direction]
-                    ]
-                    reaction_ids_by_type[0][direction] = []
-            if loopless_model is not model:
-                loopless_model.objective = Zero
-
-        elif fraction_of_optimum is not None:
-            # Safety check before setting up FVA.
-            model.slim_optimize(
-                error_value=None,
-                message="There is no optimal solution for the chosen objective!",
-            )
-            # Add the previous objective as a variable to the model then set it to
-            # zero. This also uses the fraction to create the lower/upper bound for
-            # the old objective.
-            # TODO: Use utility function here (fix_objective_as_constraint)?
-            if model.solver.objective.direction == "max":
-                fva_old_objective = prob.Variable(
-                    "fva_old_objective",
-                    lb=fraction_of_optimum * model.solver.objective.value,
-                )
-            else:
-                fva_old_objective = prob.Variable(
-                    "fva_old_objective",
-                    ub=fraction_of_optimum * model.solver.objective.value,
-                )
-            fva_old_obj_constraint = prob.Constraint(
-                model.solver.objective.expression - fva_old_objective,
-                lb=0,
-                ub=0,
-                name="fva_old_objective_constraint",
-            )
-            model.add_cons_vars([fva_old_objective, fva_old_obj_constraint])
-
-        if not use_loopless_constraints and pfba_factor is not None:
-            if pfba_factor < 1.0:
-                warn(
-                    "The 'pfba_factor' should be larger or equal to 1.",
-                    UserWarning,
-                )
-            with model:
-                add_pfba(model, fraction_of_optimum=0)
-                ub = model.slim_optimize(error_value=None)
-                flux_sum = prob.Variable("flux_sum", ub=pfba_factor * ub)
-                flux_sum_constraint = prob.Constraint(
-                    model.solver.objective.expression - flux_sum,
-                    lb=0,
-                    ub=0,
-                    name="flux_sum_constraint",
-                )
-            model.add_cons_vars([flux_sum, flux_sum_constraint])
+                reaction_ids_by_type = [{"minimum": [], "maximum": []}, requested]
+        else:
+            _add_objective_bounds(model, fraction_of_optimum, pfba_factor)
 
         model.objective = Zero  # This will trigger the reset as well
 
@@ -880,44 +650,18 @@ def flux_variability_analysis(
                     else:
                         rxn_to_optimize.append(rxn_id)
 
-                if len(rxn_to_optimize) == 0:
-                    continue
-
-                cur_processes = min(processes, len(rxn_to_optimize))
-                if cur_processes > 1:
-                    # We create and destroy a new pool here in order to set the
-                    # objective direction for all reactions. This creates a
-                    # slight overhead but seems the most clean.
-                    chunk_size = len(rxn_to_optimize) // cur_processes
-                    with ProcessPool(
-                        cur_processes,
-                        initializer=_init_worker,
-                        initargs=(
-                            analysis_model,
-                            run_cycle_free_flux,
-                            what[:3],
-                            abs_flux_clip,
-                            all_fluxes,
-                        ),
-                    ) as pool:
-                        for rxn_id, value, fluxes in pool.imap_unordered(
-                            _fva_step, rxn_to_optimize, chunksize=chunk_size
-                        ):
-                            fva_result.at[rxn_id, what] = value
-                            if all_fluxes and fluxes is not None:
-                                flux_rows[what][rxn_id] = fluxes
-                else:
-                    _init_worker(
-                        analysis_model,
-                        run_cycle_free_flux,
-                        what[:3],
-                        abs_flux_clip,
-                        all_fluxes,
-                    )
-                    for rxn_id, value, fluxes in map(_fva_step, rxn_to_optimize):
-                        fva_result.at[rxn_id, what] = value
-                        if all_fluxes and fluxes is not None:
-                            flux_rows[what][rxn_id] = fluxes
+                for rxn_id, value, fluxes in _optimize_reactions(
+                    analysis_model,
+                    rxn_to_optimize,
+                    what[:3],
+                    run_cycle_free_flux,
+                    abs_flux_clip,
+                    processes,
+                    all_fluxes,
+                ):
+                    fva_result.at[rxn_id, what] = value
+                    if all_fluxes and fluxes is not None:
+                        flux_rows[what][rxn_id] = fluxes
 
     if all_fluxes:
         return (
