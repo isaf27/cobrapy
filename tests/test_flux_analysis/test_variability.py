@@ -274,6 +274,16 @@ def test_flux_variability_loopless_additional_constraint(
     assert fva_out.at["DM_C", "maximum"] == pytest.approx(0.0, abs=1e-6)
 
 
+def test_flux_variability_cycle_free_flux_abs_flux_clip(ll_test_model: Model) -> None:
+    """Test clipped FVA with CycleFreeFlux for non-cyclic and cyclic reactions."""
+    ll_test_model.reactions.v2 *= -1
+    fva_out = flux_variability_analysis(
+        ll_test_model, loopless="cycleFreeFlux", abs_flux_clip=0.1, processes=1
+    )
+    assert fva_out.at["DM_C", "maximum"] == pytest.approx(0.1)
+    assert fva_out.at["v3", "maximum"] == pytest.approx(0.0, abs=1e-6)
+
+
 # Internals (essentiality)
 def test_fva_data_frame(model: Model) -> None:
     """Test DataFrame obtained from FVA."""
@@ -376,7 +386,7 @@ def test_fva_all_fluxes(
     for direction, frame in fluxes.items():
         assert set(frame.index) == {r.id for r in reactions}
         assert set(frame.columns) == {r.id for r in model.reactions}
-        # The actual flux may exceed the threshold, but clipping it must give
+        # The actual flux may exceed the clip, but clipping it must give
         # the reported bound. The full distribution must remain feasible.
         for rxn_id in frame.index:
             value = frame.at[rxn_id, rxn_id]

@@ -3,7 +3,7 @@
 import logging
 from typing import TYPE_CHECKING, List, Optional, Union
 
-from ..core import Configuration, get_solution
+from ..core import get_solution
 from .helpers import normalize_cutoff
 from .variability import flux_variability_analysis
 
@@ -15,7 +15,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-configuration = Configuration()
 
 
 class BlockedReactionsResult(List[str]):

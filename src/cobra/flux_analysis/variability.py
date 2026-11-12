@@ -42,11 +42,16 @@ def _init_abs_flux_clip_target(abs_flux_clip: Optional[float], sense: str) -> No
     _abs_flux_clip_target = None
     _abs_flux_clip_constraint = None
 
-    if abs_flux_clip is None:
-        return
-
     target_name = "_fva_abs_flux_clip_target"
     constraint_name = "_fva_abs_flux_clip_constraint"
+
+    if abs_flux_clip is None:
+        # An earlier pass on the same model may have left its target behind.
+        if target_name in _model.solver.variables:
+            _model.remove_cons_vars(
+                [_model.constraints[constraint_name], _model.variables[target_name]]
+            )
+        return
 
     if target_name in _model.solver.variables:
         _abs_flux_clip_target = _model.variables[target_name]

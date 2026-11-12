@@ -30,8 +30,8 @@ def test_find_blocked_reactions(model: Model, all_solvers: List[str]) -> None:
 
 def test_find_blocked_reactions_order(model: Model) -> None:
     """Test find_blocked_reactions() returns the reactions in the given order."""
-    result = find_blocked_reactions(model)
-    reaction_ids = [reaction.id for reaction in model.reactions]
+    reaction_ids = [reaction.id for reaction in model.reactions][::-1]
+    result = find_blocked_reactions(model, reaction_ids)
     for blocked in (result, result.forward_blocked, result.reverse_blocked):
         assert blocked == [rxn_id for rxn_id in reaction_ids if rxn_id in blocked]
 
