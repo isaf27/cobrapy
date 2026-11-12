@@ -7,7 +7,7 @@ from warnings import warn
 import numpy as np
 import optlang
 import pandas as pd
-from optlang.symbolics import Zero
+from optlang.symbolics import Zero, add
 
 from ..core import Configuration, get_solution
 from ..util import ProcessPool
@@ -24,6 +24,143 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 configuration = Configuration()
+
+
+def _requires_loopless_for_all(
+    model: "Model",
+    cyclic_reactions: List[str],
+    cyclic_directions: List[Tuple[bool, bool]],
+) -> bool:
+    """Check whether cycle removal may violate the model's constraints.
+
+    Removing a cycle decreases forward or reverse reaction variables while
+    leaving other variables unchanged. Standard stoichiometric constraints are
+    preserved. For other linear constraints, decreasing a variable must not
+    decrease a lower-bounded expression or increase an upper-bounded one.
+
+    This is a sufficient test for using LP for non-cyclic target directions,
+    not a test of whether their optima actually change. Unsupported constraint
+    types conservatively require loopless constraints for every target.
+    """
+    variables = model.variables
+    cyclic_variables = set()
+    for reaction_id, directions in zip(cyclic_reactions, cyclic_directions):
+        reaction = model.reactions.get_by_id(reaction_id)
+        for variable, cyclic in zip(
+            (variables[reaction.reverse_id], variables[reaction.id]), directions
+        ):
+            if not cyclic:
+                continue
+            if variable.type != "continuous" or (
+                variable.lb is not None and variable.lb > 0
+            ):
+                return True
+            cyclic_variables.add(variable)
+
+    if not cyclic_variables:
+        return False
+
+    for constraint in model.constraints:
+        if constraint.indicator_variable is not None or not constraint.is_Linear:
+            return True
+        coefficients = constraint.get_linear_coefficients(constraint.variables)
+        affected = cyclic_variables.intersection(coefficients)
+        if not affected:
+            continue
+
+        # Recognize actual mass-balance rows, not just their names: users may
+        # have modified a metabolite constraint through the solver interface.
+        if constraint.name in model.metabolites:
+            metabolite = model.metabolites.get_by_id(constraint.name)
+            expected = {}
+            for reaction in metabolite.reactions:
+                coefficient = reaction.get_coefficient(metabolite)
+                expected[variables[reaction.id]] = coefficient
+                expected[variables[reaction.reverse_id]] = -coefficient
+            if coefficients == expected:
+                continue
+
+        for variable in affected:
+            coefficient = coefficients[variable]
+            if (constraint.lb is not None and coefficient > 0) or (
+                constraint.ub is not None and coefficient < 0
+            ):
+                return True
+
+    return False
+
+
+def _add_loopless_fva_objective_bounds(
+    model: "Model",
+    loopless_model: "Model",
+    fraction_of_optimum: Optional[float],
+    pfba_factor: Optional[float],
+) -> None:
+    """Compute loopless reference values and add the same bounds to both models.
+
+    The original objective is constrained before minimizing the total flux.
+    Only reaction variables enter the flux sum. Loopless auxiliary variables
+    are excluded. If both arguments refer to the same model, add each bound
+    only once.
+    """
+    models = [model] if model is loopless_model else [model, loopless_model]
+    if fraction_of_optimum is not None:
+        optimum = loopless_model.slim_optimize(
+            error_value=None,
+            message="There is no optimal solution for the chosen loopless objective!",
+        )
+        for target in models:
+            bound = fraction_of_optimum * optimum
+            maximize = target.objective.direction == "max"
+            target.add_cons_vars(
+                [
+                    target.problem.Constraint(
+                        target.objective.expression,
+                        lb=bound if maximize else None,
+                        ub=None if maximize else bound,
+                        name="fva_old_objective_constraint",
+                    )
+                ]
+            )
+
+    if pfba_factor is not None:
+        if pfba_factor < 1.0:
+            warn("The 'pfba_factor' should be larger or equal to 1.", UserWarning)
+        with loopless_model:
+            flux_sum = add(
+                [
+                    variable
+                    for reaction in loopless_model.reactions
+                    for variable in (
+                        reaction.forward_variable,
+                        reaction.reverse_variable,
+                    )
+                ]
+            )
+            loopless_model.objective = loopless_model.problem.Objective(
+                flux_sum, direction="min"
+            )
+            minimum_sum = loopless_model.slim_optimize(error_value=None)
+        for target in models:
+            flux_sum = add(
+                [
+                    variable
+                    for reaction in target.reactions
+                    for variable in (
+                        reaction.forward_variable,
+                        reaction.reverse_variable,
+                    )
+                ]
+            )
+            target.add_cons_vars(
+                [
+                    target.problem.Constraint(
+                        flux_sum,
+                        ub=pfba_factor * minimum_sum,
+                        name="flux_sum_constraint",
+                    )
+                ]
+            )
 
 
 def _set_mipgap(model: "Model", mipgap: float) -> Callable[[], None]:
@@ -477,6 +614,14 @@ def flux_variability_analysis(
     :func:`add_loopless` for details of these loopless constraint
     formulations.
 
+    These two methods also use loopless constraints when computing the reference
+    objective for `fraction_of_optimum` and the minimum total flux for
+    `pfba_factor`. Non-cyclic target directions use the base model only when
+    cycle removal is guaranteed to preserve its constraints. Otherwise, all
+    targets use the loopless model. Requesting `all_fluxes` also requires the
+    loopless model so that the returned distributions, not just the bounds,
+    are loopless.
+
     If `loopless` is set to "cycleFreeFlux", the loops removal algorithm will be
     used (see [3]_). Note: this algorithm does not guarantee to find optimal bounds.
 
@@ -604,9 +749,40 @@ def flux_variability_analysis(
 
     flux_rows: Dict[str, Dict[str, pd.Series]] = {"minimum": {}, "maximum": {}}
 
+    use_loopless_constraints = loopless in ("fastSNP", "potentials")
     prob = model.problem
     with model:
-        if fraction_of_optimum is not None:
+        loopless_model = model
+        if use_loopless_constraints:
+            if cyclic_reactions:
+                loopless_model = model.copy()
+                add_loopless(
+                    loopless_model, method=loopless, reactions=cyclic_reactions
+                )
+            _add_loopless_fva_objective_bounds(
+                model, loopless_model, fraction_of_optimum, pfba_factor
+            )
+
+            # Screening has indicators only for cyclic reactions, even when
+            # additional constraints require MILP for non-cyclic targets too.
+            cyclic_targets = {
+                direction: ids.copy()
+                for direction, ids in reaction_ids_by_type[1].items()
+            }
+            if all_fluxes or _requires_loopless_for_all(
+                model, cyclic_reactions, cyclic_directions
+            ):
+                for direction in ("minimum", "maximum"):
+                    reaction_ids_by_type[1][direction] = [
+                        reaction_id
+                        for reaction_id in reaction_ids
+                        if reaction_id in requested_by_direction[direction]
+                    ]
+                    reaction_ids_by_type[0][direction] = []
+            if loopless_model is not model:
+                loopless_model.objective = Zero
+
+        elif fraction_of_optimum is not None:
             # Safety check before setting up FVA.
             model.slim_optimize(
                 error_value=None,
@@ -634,7 +810,7 @@ def flux_variability_analysis(
             )
             model.add_cons_vars([fva_old_objective, fva_old_obj_constraint])
 
-        if pfba_factor is not None:
+        if not use_loopless_constraints and pfba_factor is not None:
             if pfba_factor < 1.0:
                 warn(
                     "The 'pfba_factor' should be larger or equal to 1.",
@@ -655,8 +831,6 @@ def flux_variability_analysis(
         model.objective = Zero  # This will trigger the reset as well
 
         clipped_reactions = {"minimum": {}, "maximum": {}}
-        use_loopless_constraints = loopless in ("fastSNP", "potentials")
-        loopless_constraints_added = False
 
         for loopless_reactions, opt_rxn_ids in enumerate(reaction_ids_by_type):
             if len(opt_rxn_ids["minimum"]) == 0 and len(opt_rxn_ids["maximum"]) == 0:
@@ -677,27 +851,22 @@ def flux_variability_analysis(
             run_cycle_free_flux = loopless == "cycleFreeFlux" and (
                 bool(loopless_reactions) or all_fluxes
             )
-            # Full distributions need loopless constraints even for targets
-            # outside cycles. Otherwise retain the cheaper LP for those targets.
-            if (
-                use_loopless_constraints
-                and not loopless_constraints_added
-                and (all_fluxes or loopless_reactions)
-            ):
-                # The clipped search uses its own directional constraints, so
-                # run it before adding the permanent constraints.
-                if abs_flux_clip is not None and any(reaction_ids_by_type[1].values()):
+            analysis_model = model
+            if use_loopless_constraints and loopless_reactions:
+                # The base model has the same objective/pFBA bounds but no
+                # loopless constraints. Screening adds its directional form
+                # there without changing the model used for individual MILPs.
+                if abs_flux_clip is not None and any(cyclic_targets.values()):
                     clipped_reactions = _find_loopless_fva_clipped_reactions(
                         model=model,
-                        reactions_by_direction=reaction_ids_by_type[1],
+                        reactions_by_direction=cyclic_targets,
                         loopless=loopless,
                         abs_flux_clip=abs_flux_clip,
                         cyclic_reactions=cyclic_reactions,
                         processes=processes,
                         all_fluxes=all_fluxes,
                     )
-                add_loopless(model, method=loopless, reactions=cyclic_reactions)
-                loopless_constraints_added = True
+                analysis_model = loopless_model
 
             for what in ("minimum", "maximum"):
                 rxn_to_optimize = []
@@ -724,7 +893,7 @@ def flux_variability_analysis(
                         cur_processes,
                         initializer=_init_worker,
                         initargs=(
-                            model,
+                            analysis_model,
                             run_cycle_free_flux,
                             what[:3],
                             abs_flux_clip,
@@ -739,7 +908,11 @@ def flux_variability_analysis(
                                 flux_rows[what][rxn_id] = fluxes
                 else:
                     _init_worker(
-                        model, run_cycle_free_flux, what[:3], abs_flux_clip, all_fluxes
+                        analysis_model,
+                        run_cycle_free_flux,
+                        what[:3],
+                        abs_flux_clip,
+                        all_fluxes,
                     )
                     for rxn_id, value, fluxes in map(_fva_step, rxn_to_optimize):
                         fva_result.at[rxn_id, what] = value

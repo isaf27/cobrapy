@@ -36,12 +36,16 @@ def _add_loopless_with_nullspace(
         rxn = model.reactions[ridx]
         # indicator variable a_i
         indicator = prob.Variable(f"indicator_{rxn.id}", type="binary")
-        # -M*(1 - a_i) <= v_i <= M*a_i
-        on_off_constraint = prob.Constraint(
-            rxn.flux_expression - max_bound * indicator,
-            lb=-max_bound,
+        # lb_i * (1 - a_i) <= v_i <= ub_i * a_i
+        on_off_forward = prob.Constraint(
+            rxn.flux_expression - rxn.upper_bound * indicator,
             ub=0,
-            name=f"on_off_{rxn.id}",
+            name=f"on_off_forward_{rxn.id}",
+        )
+        on_off_reverse = prob.Constraint(
+            rxn.flux_expression + rxn.lower_bound * indicator,
+            lb=rxn.lower_bound,
+            name=f"on_off_reverse_{rxn.id}",
         )
         # -(max_bound + 1) * a_i + 1 <= G_i <= -(max_bound + 1) * a_i + max_bound
         delta_g = prob.Variable(f"delta_g_{rxn.id}")
@@ -51,7 +55,9 @@ def _add_loopless_with_nullspace(
             ub=max_bound,
             name=f"delta_g_range_{rxn.id}",
         )
-        to_add.extend([indicator, on_off_constraint, delta_g, delta_g_range])
+        to_add.extend(
+            [indicator, on_off_forward, on_off_reverse, delta_g, delta_g_range]
+        )
 
     model.add_cons_vars(to_add)
 
@@ -93,9 +99,9 @@ def _add_loopless_with_nullspace_directional(
             name=f"single_nonzero_direction_{rxn.id}",
         )
 
-        # eps * a_i+ <= v_i+ <= M * a_i+
+        # eps * a_i+ <= v_i+ <= ub_i * a_i+
         on_off_constraint_maximum1 = prob.Constraint(
-            rxn.forward_variable - max_bound * indicator_maximum,
+            rxn.forward_variable - rxn.upper_bound * indicator_maximum,
             ub=0,
             name=f"on_off_maximum1_{rxn.id}",
         )
@@ -105,9 +111,9 @@ def _add_loopless_with_nullspace_directional(
             name=f"on_off_maximum2_{rxn.id}",
         )
 
-        # eps * a_i- <= v_i- <= M * a_i-
+        # eps * a_i- <= v_i- <= -lb_i * a_i-
         on_off_constraint_minimum1 = prob.Constraint(
-            rxn.reverse_variable - max_bound * indicator_minimum,
+            rxn.reverse_variable + rxn.lower_bound * indicator_minimum,
             ub=0,
             name=f"on_off_minimum1_{rxn.id}",
         )
@@ -180,14 +186,18 @@ def _add_loopless_with_potentials(
         rxn = model.reactions[ridx]
         # indicator variable a_i
         indicator = prob.Variable(f"indicator_{rxn.id}", type="binary")
-        # -M*(1 - a_i) <= v_i <= M*a_i
-        on_off_constraint = prob.Constraint(
-            rxn.flux_expression - max_bound * indicator,
-            lb=-max_bound,
+        # lb_i * (1 - a_i) <= v_i <= ub_i * a_i
+        on_off_forward = prob.Constraint(
+            rxn.flux_expression - rxn.upper_bound * indicator,
             ub=0,
-            name=f"on_off_{rxn.id}",
+            name=f"on_off_forward_{rxn.id}",
         )
-        to_add.extend([indicator, on_off_constraint])
+        on_off_reverse = prob.Constraint(
+            rxn.flux_expression + rxn.lower_bound * indicator,
+            lb=rxn.lower_bound,
+            name=f"on_off_reverse_{rxn.id}",
+        )
+        to_add.extend([indicator, on_off_forward, on_off_reverse])
 
     model.add_cons_vars(to_add)
 
@@ -236,9 +246,9 @@ def _add_loopless_with_potentials_directional(
             name=f"single_nonzero_direction_{rxn.id}",
         )
 
-        # eps * a_i+ <= v_i+ <= M * a_i+
+        # eps * a_i+ <= v_i+ <= ub_i * a_i+
         on_off_constraint_maximum1 = prob.Constraint(
-            rxn.forward_variable - max_bound * indicator_maximum,
+            rxn.forward_variable - rxn.upper_bound * indicator_maximum,
             ub=0,
             name=f"on_off_maximum1_{rxn.id}",
         )
@@ -248,9 +258,9 @@ def _add_loopless_with_potentials_directional(
             name=f"on_off_maximum2_{rxn.id}",
         )
 
-        # eps * a_i- <= v_i- <= M * a_i-
+        # eps * a_i- <= v_i- <= -lb_i * a_i-
         on_off_constraint_minimum1 = prob.Constraint(
-            rxn.reverse_variable - max_bound * indicator_minimum,
+            rxn.reverse_variable + rxn.lower_bound * indicator_minimum,
             ub=0,
             name=f"on_off_minimum1_{rxn.id}",
         )
