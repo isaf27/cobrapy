@@ -17,6 +17,7 @@ from .moma import add_moma, moma
 from .parsimonious import pfba
 from .phenotype_phase_plane import production_envelope
 from .room import add_room, room
+from .spectra_cc import spectra_cc
 from .variability import (
     find_essential_genes,
     find_essential_reactions,
