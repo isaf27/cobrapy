@@ -22,10 +22,18 @@ def test_find_blocked_reactions(model: Model, all_solvers: List[str]) -> None:
     assert result == ["FRUpts2"]
 
     result = find_blocked_reactions(model, model.reactions[42:48])
-    assert set(result) == {"FUMt2_2", "FRUpts2"}
+    assert result == ["FRUpts2", "FUMt2_2"]
 
     result = find_blocked_reactions(model, model.reactions[30:50], open_exchanges=True)
     assert result == []
+
+
+def test_find_blocked_reactions_order(model: Model) -> None:
+    """Test find_blocked_reactions() returns the reactions in the given order."""
+    result = find_blocked_reactions(model)
+    reaction_ids = [reaction.id for reaction in model.reactions]
+    for blocked in (result, result.forward_blocked, result.reverse_blocked):
+        assert blocked == [rxn_id for rxn_id in reaction_ids if rxn_id in blocked]
 
 
 def test_find_blocked_reactions_without_clip(model: Model) -> None:

@@ -166,6 +166,7 @@ def find_blocked_reactions(
             reaction_list = model.reactions
         else:
             reaction_list = model.reactions.get_by_any(reaction_list)
+        reaction_ids = list(dict.fromkeys(reaction.id for reaction in reaction_list))
 
         model.slim_optimize(
             error_value=None,
@@ -195,6 +196,7 @@ def find_blocked_reactions(
             abs_flux_clip=abs_flux_clip,
             processes=processes,
         )
+        flux_span = flux_span.loc[reaction_ids]
         _warn_near_zero_cutoff_fluxes(flux_span, zero_cutoff)
 
         # A direction is blocked if its flux bound is below the cutoff. Bounds

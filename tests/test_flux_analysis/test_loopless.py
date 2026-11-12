@@ -55,6 +55,14 @@ def test_loopless_solution_fluxes(model: Model) -> None:
     assert ll_solution.objective_value == pytest.approx(sol.objective_value)
 
 
+def test_loopless_solution_fluxes_within_tolerance(model: Model) -> None:
+    """Test loopless_solution() with a flux that violates a bound by round-off."""
+    fluxes = model.optimize().fluxes
+    fluxes["ATPM"] -= 1e-9
+    solution = loopless_solution(model, fluxes=fluxes)
+    assert solution.status == OPTIMAL
+
+
 @pytest.mark.parametrize("reaction_id", ["EX_A", "entry"])
 def test_loopless_fva_solution_removes_unrelated_cycle(
     ll_test_model: Model, reaction_id: str, mocker

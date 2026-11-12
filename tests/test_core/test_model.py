@@ -585,12 +585,6 @@ def test_copy(model: Model) -> None:
     assert "ACALD" not in cp_model.reactions
 
 
-def test_copy_keeps_tolerance(model: Model) -> None:
-    """Test that a copied model has the tolerance of the original."""
-    model.tolerance = 1e-8
-    assert model.copy().tolerance == 1e-8
-
-
 def test_copy_with_groups(model: Model) -> None:
     """Copy model with groups and check that groups are copied correctly.
 

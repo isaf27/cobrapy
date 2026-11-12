@@ -13,7 +13,6 @@
 
 ## Fixes
 
-- `Model.copy` now keeps the tolerance of the model.
 - `add_loopless` now handles models and reaction selections without internal cycles, and `find_cyclic_reactions` returns empty results when there are no internal reactions.
 - FASTCC now uses the feasible direction of negative-only irreversible reactions when constructing its consistency LP, preserving consistency under supported reaction reversal.
 - type-annotations on resetable properties fixed.
