@@ -8,7 +8,7 @@
 - `Dictlists` (`model.reactions`, `model.genes`, `model.metabolites`) are now generic containers and the types of their contents are now inferable by python type checkers.
 - `add_loopless` gained `method="potentials"`, which formulates the loopless constraints with metabolite potentials instead of a nullspace basis, and a `flux_threshold` argument that adds one indicator per reaction direction. `flux_variability_analysis` accepts `loopless="potentials"`.
 - `flux_variability_analysis` gained an `abs_flux_clip` argument that clips the reported bounds, which avoids optimizing reactions beyond that value. It also accepts `fraction_of_optimum=None` to leave the objective unconstrained and `(reaction, direction)` tuples in `reaction_list` to compute only one bound of a reaction.
-- `find_blocked_reactions` gained a `loopless` argument to find the reactions that cannot carry flux in any loopless flux distribution. Its result still behaves as a list of the blocked reactions and additionally has the attributes `forward_blocked` and `reverse_blocked`.
+- `find_blocked_reactions` gained a `loopless` argument to find the reactions that cannot carry flux in any loopless flux distribution. It also gained an `abs_flux_clip` argument (default 0.1), up to which the fluxes are optimized. Its result still behaves as a list of the blocked reactions and additionally has the attributes `forward_blocked` and `reverse_blocked`.
 - `cobra.manipulation.clip_reaction_bounds` clips all reaction bounds to a maximal absolute value.
 
 ## Fixes
@@ -33,3 +33,4 @@
 - `find_blocked_reactions` moved from `cobra.flux_analysis.variability` to `cobra.flux_analysis.blocked`. Importing it from `cobra.flux_analysis` works as before.
 - `flux_variability_analysis` with `loopless="fastSNP"` now computes the optimum for `fraction_of_optimum` and the minimal total flux for `pfba_factor` with loopless constraints, so its bounds can differ from earlier versions.
 - The default `bound` of `find_cyclic_reactions` changed from 1e4 to 1e3.
+- The new arguments `abs_flux_clip` of `flux_variability_analysis` and `loopless` of `find_blocked_reactions` are not the last ones, so the arguments after them (`processes`; `zero_cutoff`, `open_exchanges` and `processes`) have to be passed by keyword.

@@ -1,5 +1,6 @@
 """Test functionalities of Flux Variability Analysis."""
 
+import logging
 import os
 from typing import Callable, List, Optional
 
@@ -9,7 +10,6 @@ import pytest
 
 from cobra import Metabolite, Model, Reaction
 from cobra.exceptions import Infeasible
-from cobra.flux_analysis import variability
 from cobra.flux_analysis.loopless import add_loopless
 from cobra.flux_analysis.variability import (
     find_essential_genes,
@@ -111,6 +111,18 @@ def test_flux_variability_directional_reactions(model: Model) -> None:
     assert np.isnan(directional.at["SUCDi", "maximum"])
     assert directional.at["FUM", "minimum"] == pytest.approx(full.at["FUM", "minimum"])
     assert directional.at["FUM", "maximum"] == pytest.approx(full.at["FUM", "maximum"])
+
+
+def test_flux_variability_invalid_direction(model: Model) -> None:
+    """Test FVA with an unknown direction of a reaction."""
+    with pytest.raises(ValueError, match="'min', 'max'"):
+        flux_variability_analysis(model, reaction_list=[("FUM", "up")])
+
+
+def test_flux_variability_abs_flux_clip_within_tolerance(model: Model) -> None:
+    """Test FVA with a clip that is not above the tolerance."""
+    with pytest.raises(ValueError, match="abs_flux_clip"):
+        flux_variability_analysis(model, abs_flux_clip=model.tolerance)
 
 
 @pytest.mark.parametrize("processes", [1, 2])
@@ -406,16 +418,15 @@ def test_fva_all_fluxes(
 
 @pytest.mark.parametrize("loopless", ["fastSNP", "potentials"])
 @pytest.mark.parametrize("processes", [1, 2])
-def test_fva_all_fluxes_precomputed(
-    ll_test_model: Model, loopless: str, processes: int, mocker
+def test_fva_all_fluxes_clipped_loopless(
+    ll_test_model: Model, loopless: str, processes: int, caplog
 ) -> None:
-    """Reuse validated distributions for clipped reactions in both directions."""
+    """Clipped loopless bounds come with loopless distributions."""
     if processes > 1 and "SKIP_MP" in os.environ:
         pytest.skip("unsafe for parallel execution")
     model = ll_test_model
-    # Reverse v2 so precomputation supplies both minimum and maximum rows.
+    # Reverse v2 so that both a minimum and a maximum reach the clip.
     model.reactions.v2 *= -1
-    search = mocker.spy(variability, "_find_loopless_fva_clipped_reactions")
     requests = [("v2", "min"), ("v1", "max"), ("v3", "max"), ("EX_A", "min")]
     bounds, fluxes = flux_variability_analysis(
         model,
@@ -434,13 +445,8 @@ def test_fva_all_fluxes_precomputed(
     assert bounds.at["v2", "minimum"] == pytest.approx(-10.0)
     assert bounds.at["v3", "maximum"] == pytest.approx(0.0, abs=1e-6)
 
-    # Exercise the actual precomputation; a silent fallback must not pass.
-    for direction, rxn_id in [("maximum", "v1"), ("minimum", "v2")]:
-        pd.testing.assert_series_equal(
-            fluxes[direction].loc[rxn_id],
-            search.spy_return[direction][rxn_id],
-            check_names=False,
-        )
+    # A failed screening falls back to single optimizations with a warning.
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     for frame in fluxes.values():
         assert np.allclose(frame["v3"], 0.0, atol=1e-6)
         assert np.allclose(frame["EX_A"], 1000.0)
@@ -450,7 +456,7 @@ def test_fva_all_fluxes_precomputed(
 
 
 @pytest.mark.parametrize("loopless", ["fastSNP", "potentials"])
-def test_fva_all_fluxes_precomputed_respects_bounds(
+def test_fva_all_fluxes_clipped_loopless_respects_bounds(
     ll_test_model: Model, loopless: str
 ) -> None:
     """Distributions of clipped reactions keep the forced flux of a cyclic reaction."""

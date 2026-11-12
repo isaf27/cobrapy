@@ -33,6 +33,9 @@ def add_nullspace_energies(
 ) -> List[Dict["Variable", float]]:
     """Add an energy variable G_i per reaction with N_int * G = 0.
 
+    The rows of `n_int` are the basis vectors of the nullspace and its columns
+    correspond to `reactions`.
+
     Returns the energy of each reaction as coefficients of a linear expression.
     """
     prob = model.problem
@@ -59,6 +62,8 @@ def add_potential_energies(
     zero_cutoff: float,
 ) -> List[Dict["Variable", float]]:
     """Add a potential variable per metabolite, so that G = S_int^T * potentials.
+
+    The columns of `s_int` correspond to the constrained reactions.
 
     Returns the energy of each reaction as coefficients of a linear expression.
     """

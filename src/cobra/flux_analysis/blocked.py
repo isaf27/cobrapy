@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 configuration = Configuration()
 
 
-class BlockedReactionsResult(list[str]):
+class BlockedReactionsResult(List[str]):
     """List of the identifiers of reactions that are blocked in both directions.
 
     Attributes
@@ -173,7 +173,8 @@ def find_blocked_reactions(
         )
         if loopless is None:
             # A direction that clearly carries flux in this solution is not
-            # blocked, so only the other directions need to be checked.
+            # blocked, so only the other directions need to be checked. With
+            # `loopless`, the flux could be part of a loop and proves nothing.
             solution = get_solution(model, reactions=reaction_list)
             clear_flux = zero_cutoff if abs_flux_clip is None else 10 * abs_flux_clip
             forward_unknown = solution.fluxes[

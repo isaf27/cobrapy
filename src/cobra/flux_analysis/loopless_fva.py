@@ -58,6 +58,7 @@ def requires_loopless_for_all(
         ):
             if not cyclic:
                 continue
+            # Decreasing the variable can violate its own lower bound or type.
             if variable.type != "continuous" or (
                 variable.lb is not None and variable.lb > 0
             ):
@@ -74,6 +75,8 @@ def requires_loopless_for_all(
         affected = cyclic_variables.intersection(coefficients)
         if not affected or _is_mass_balance(model, constraint, coefficients):
             continue
+        # Decreasing a variable lowers the constraint expression if its
+        # coefficient is positive and raises it otherwise.
         for variable in affected:
             coefficient = coefficients[variable]
             if (constraint.lb is not None and coefficient > 0) or (
@@ -118,8 +121,8 @@ def add_loopless_objective_bounds(
 ) -> None:
     """Bound the objective and the total flux of both models by loopless optima.
 
-    The optima are computed with `loopless_model`, the minimal total flux
-    after the objective has been bounded.
+    Both optima are computed with `loopless_model`. The total flux is
+    minimized after the objective has been bounded.
     """
     models = [model] if model is loopless_model else [model, loopless_model]
     if fraction_of_optimum is not None:
@@ -162,7 +165,10 @@ def add_loopless_objective_bounds(
 
 
 def _set_mip_gap(model: "Model", mip_gap: float) -> None:
-    """Set the MIP gap of CPLEX or Gurobi until the model context exits."""
+    """Set the MIP gap until the model context exits.
+
+    Only CPLEX and Gurobi are supported, other solvers keep their gap.
+    """
     solver = sutil.interface_to_str(model.problem)
     problem = model.solver.problem
     if solver == "cplex":
@@ -220,7 +226,7 @@ class ClippedFluxScreening:
         model.objective.set_linear_coefficients(coefficients)
         model.objective.direction = "max"
 
-        name = "loopless_fva_at_least_one_remaining_candidate"
+        name = "loopless_fva_any_remaining_target"
         model.add_cons_vars([model.problem.Constraint(Zero, lb=1, name=name)])
         self._any_remaining = model.constraints[name]
         self._any_remaining.set_linear_coefficients(coefficients)

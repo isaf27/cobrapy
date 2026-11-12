@@ -27,10 +27,10 @@ def _warn_about_integrality_tolerance(
     model: "Model", flux_threshold: float, max_bound: float
 ) -> None:
     """Warn if inactive indicators may allow a flux close to `flux_threshold`."""
-    try:
-        integrality_tolerance = model.solver.configuration.tolerances.integrality
-    except AttributeError:
-        integrality_tolerance = None
+    # Not all solver interfaces expose this tolerance.
+    integrality_tolerance = getattr(
+        model.solver.configuration.tolerances, "integrality", None
+    )
 
     if (
         integrality_tolerance is None

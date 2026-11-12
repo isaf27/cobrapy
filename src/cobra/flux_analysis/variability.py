@@ -1,7 +1,7 @@
 """Provide variability based methods such as flux variability or gene essentiality."""
 
 import logging
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Set, Tuple, Union
 from warnings import warn
 
 import numpy as np
@@ -337,10 +337,33 @@ def _optimize_reactions(
     return list(map(_fva_step, reaction_ids))
 
 
-def _find_loopless_fva_clipped_reactions(
+def _confirm_clipped_bounds(
+    model: "Model",
+    candidates: List[Tuple[str, str]],
+    abs_flux_clip: float,
+    processes: int,
+    all_fluxes: bool,
+) -> Iterator[Tuple[str, str, Optional[pd.Series]]]:
+    """Optimize the candidates and yield those whose bound reaches the clip."""
+    for direction in ("minimum", "maximum"):
+        rxn_ids = [rxn_id for rxn_id, d in candidates if d == direction]
+        for rxn_id, bound, fluxes in _optimize_reactions(
+            model,
+            rxn_ids,
+            sense=direction[:3],
+            cycle_free_flux=False,
+            abs_flux_clip=abs_flux_clip,
+            processes=processes,
+            all_fluxes=all_fluxes,
+        ):
+            if abs(bound) >= abs_flux_clip - model.tolerance:
+                yield direction, rxn_id, fluxes
+
+
+def _find_clipped_loopless_bounds(
     model: "Model",
     requested: Dict[str, List[str]],
-    loopless: str,
+    method: str,
     abs_flux_clip: float,
     cyclic_reactions: List[str],
     processes: int,
@@ -364,29 +387,25 @@ def _find_loopless_fva_clipped_reactions(
 
     result = {"minimum": {}, "maximum": {}}
     with model:
+        # The screening only proposes candidates. They are confirmed by linear
+        # programs on a copy without loopless constraints, in which the
+        # directions without flux in the screening solution are closed.
         validation_model = model.copy()
         try:
             screening = ClippedFluxScreening(
-                model, loopless, cyclic_reactions, targets, abs_flux_clip
+                model, method, cyclic_reactions, targets, abs_flux_clip
             )
-            candidates = screening.next_candidates()
-            while candidates:
+            while candidates := screening.next_candidates():
                 with validation_model:
                     screening.close_inactive_directions(validation_model)
-                    for direction in ("minimum", "maximum"):
-                        rxn_ids = [r for r, d in candidates if d == direction]
-                        for rxn_id, bound, fluxes in _optimize_reactions(
-                            validation_model,
-                            rxn_ids,
-                            direction[:3],
-                            False,
-                            abs_flux_clip,
-                            processes,
-                            all_fluxes,
-                        ):
-                            if abs(bound) >= abs_flux_clip - model.tolerance:
-                                result[direction][rxn_id] = fluxes
-                candidates = screening.next_candidates()
+                    for direction, rxn_id, fluxes in _confirm_clipped_bounds(
+                        validation_model,
+                        candidates,
+                        abs_flux_clip,
+                        processes,
+                        all_fluxes,
+                    ):
+                        result[direction][rxn_id] = fluxes
         except Exception:
             logger.warning(
                 "Screening for clipped loopless flux bounds failed. "
@@ -545,15 +564,8 @@ def flux_variability_analysis(
     if processes is None:
         processes = configuration.processes
 
-    num_reactions = len(reaction_ids)
-    processes = min(processes, num_reactions)
-
     fva_result = pd.DataFrame(
-        {
-            "minimum": np.full(num_reactions, np.nan, dtype=float),
-            "maximum": np.full(num_reactions, np.nan, dtype=float),
-        },
-        index=reaction_ids,
+        np.nan, index=reaction_ids, columns=["minimum", "maximum"]
     )
     flux_rows: Dict[str, Dict[str, pd.Series]] = {"minimum": {}, "maximum": {}}
 
@@ -595,10 +607,10 @@ def flux_variability_analysis(
             # than by one MILP each. Screening adds its own, directional
             # loopless constraints to the base model, which has the same
             # objective bounds as the loopless model.
-            clipped = _find_loopless_fva_clipped_reactions(
+            clipped = _find_clipped_loopless_bounds(
                 model=model,
                 requested=cyclic_requests,
-                loopless=loopless,
+                method=loopless,
                 abs_flux_clip=abs_flux_clip,
                 cyclic_reactions=cyclic_reactions,
                 processes=processes,
@@ -608,7 +620,7 @@ def flux_variability_analysis(
                 sign = -1 if direction == "minimum" else 1
                 for rxn_id, fluxes in clipped_fluxes.items():
                     fva_result.at[rxn_id, direction] = sign * abs_flux_clip
-                    if all_fluxes:
+                    if fluxes is not None:
                         flux_rows[direction][rxn_id] = fluxes
             loopless_requests = {
                 direction: [
@@ -643,11 +655,11 @@ def flux_variability_analysis(
                 for rxn_id, value, fluxes in _optimize_reactions(
                     loopless_model if is_loopless else model,
                     requests[direction],
-                    direction[:3],
-                    cycle_free_flux,
-                    abs_flux_clip,
-                    processes,
-                    all_fluxes,
+                    sense=direction[:3],
+                    cycle_free_flux=cycle_free_flux,
+                    abs_flux_clip=abs_flux_clip,
+                    processes=processes,
+                    all_fluxes=all_fluxes,
                 ):
                     fva_result.at[rxn_id, direction] = value
                     if fluxes is not None:
@@ -655,15 +667,15 @@ def flux_variability_analysis(
 
     if all_fluxes:
         return (
-            fva_result[["minimum", "maximum"]],
+            fva_result,
             {
-                what: pd.DataFrame.from_dict(
+                direction: pd.DataFrame.from_dict(
                     rows, orient="index", columns=[r.id for r in model.reactions]
                 ).reindex([rxn_id for rxn_id in reaction_ids if rxn_id in rows])
-                for what, rows in flux_rows.items()
+                for direction, rows in flux_rows.items()
             },
         )
-    return fva_result[["minimum", "maximum"]]
+    return fva_result
 
 
 def find_essential_genes(

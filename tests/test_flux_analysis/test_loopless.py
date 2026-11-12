@@ -1,5 +1,6 @@
 """Test functionalities of removing loops in model."""
 
+from itertools import chain, repeat
 from typing import Callable, Optional
 from unittest.mock import DEFAULT
 
@@ -75,7 +76,7 @@ def test_loopless_fva_solution_removes_unrelated_cycle(
     cyclic_solution.fluxes[["v1", "v2", "v3"]] = [11.0, 11.0, 1.0]
     mocker.patch(
         "cobra.flux_analysis.loopless.get_solution",
-        side_effect=[cyclic_solution, DEFAULT],
+        side_effect=chain([cyclic_solution], repeat(DEFAULT)),
         wraps=get_solution,
     )
 
@@ -85,7 +86,7 @@ def test_loopless_fva_solution_removes_unrelated_cycle(
 
 
 @pytest.mark.parametrize("method", ["fastSNP", "potentials", "original"])
-@pytest.mark.parametrize("flux_threshold", [None, 1e-2])
+@pytest.mark.parametrize("flux_threshold", [None, 1.0])
 def test_add_loopless(
     ll_test_model: Model, method: str, flux_threshold: Optional[float]
 ) -> None:
@@ -97,6 +98,22 @@ def test_add_loopless(
     infeasible_status = ll_test_model.solver.status
     assert feasible_status == OPTIMAL
     assert infeasible_status == INFEASIBLE
+
+
+@pytest.mark.parametrize("method", ["fastSNP", "potentials", "original"])
+def test_add_loopless_flux_threshold(ll_test_model: Model, method: str) -> None:
+    """An active directional indicator requires a flux of `flux_threshold`."""
+    add_loopless(ll_test_model, method=method, flux_threshold=5.0)
+    ll_test_model.variables["indicator_maximum_v1"].lb = 1
+    ll_test_model.objective = ll_test_model.reactions.v1
+    ll_test_model.objective_direction = "min"
+    assert ll_test_model.slim_optimize() == pytest.approx(5.0)
+
+
+def test_add_loopless_flux_threshold_warning(ll_test_model: Model) -> None:
+    """Warn if the integrality tolerance permits a flux of `flux_threshold`."""
+    with pytest.warns(UserWarning, match="integrality tolerance"):
+        add_loopless(ll_test_model, flux_threshold=1e-6)
 
 
 def test_add_loopless_infinite_bounds(ll_test_model: Model) -> None:
