@@ -1,7 +1,7 @@
 """Provide the loopless parts of flux variability analysis."""
 
 from functools import partial
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 from warnings import warn
 
 import optlang
@@ -16,28 +16,45 @@ if TYPE_CHECKING:
     from cobra import Model
 
 
+def _is_mass_balance(
+    model: "Model",
+    constraint: "optlang.interface.Constraint",
+    coefficients: Dict["optlang.interface.Variable", float],
+) -> bool:
+    """Check whether a constraint is the unmodified mass balance of a metabolite.
+
+    The name is not sufficient: users may have modified a metabolite
+    constraint through the solver interface.
+    """
+    if constraint.name not in model.metabolites:
+        return False
+    metabolite = model.metabolites.get_by_id(constraint.name)
+    expected = {}
+    for reaction in metabolite.reactions:
+        coefficient = reaction.get_coefficient(metabolite)
+        expected[reaction.forward_variable] = coefficient
+        expected[reaction.reverse_variable] = -coefficient
+    return coefficients == expected
+
+
 def requires_loopless_for_all(
     model: "Model",
     cyclic_reactions: List[str],
     cyclic_directions: List[Tuple[bool, bool]],
 ) -> bool:
-    """Check whether cycle removal may violate the model's constraints.
+    """Check whether non-cyclic directions need the loopless constraints too.
 
-    Removing a cycle decreases forward or reverse reaction variables while
-    leaving other variables unchanged. Standard stoichiometric constraints are
-    preserved. For other linear constraints, decreasing a variable must not
-    decrease a lower-bounded expression or increase an upper-bounded one.
-
-    This is a sufficient test for using LP for non-cyclic target directions,
-    not a test of whether their optima actually change. Unsupported constraint
-    types conservatively require loopless constraints for every target.
+    Removing a cycle from a flux distribution decreases the variables of cyclic
+    directions and keeps all others, which preserves the mass balances. The
+    optimum of a non-cyclic direction is therefore the same with and without
+    loopless constraints, unless decreasing these variables can violate another
+    constraint of the model.
     """
-    variables = model.variables
     cyclic_variables = set()
     for reaction_id, directions in zip(cyclic_reactions, cyclic_directions):
         reaction = model.reactions.get_by_id(reaction_id)
         for variable, cyclic in zip(
-            (variables[reaction.reverse_id], variables[reaction.id]), directions
+            (reaction.reverse_variable, reaction.forward_variable), directions
         ):
             if not cyclic:
                 continue
@@ -55,21 +72,8 @@ def requires_loopless_for_all(
             return True
         coefficients = constraint.get_linear_coefficients(constraint.variables)
         affected = cyclic_variables.intersection(coefficients)
-        if not affected:
+        if not affected or _is_mass_balance(model, constraint, coefficients):
             continue
-
-        # Recognize actual mass-balance rows, not just their names: users may
-        # have modified a metabolite constraint through the solver interface.
-        if constraint.name in model.metabolites:
-            metabolite = model.metabolites.get_by_id(constraint.name)
-            expected = {}
-            for reaction in metabolite.reactions:
-                coefficient = reaction.get_coefficient(metabolite)
-                expected[variables[reaction.id]] = coefficient
-                expected[variables[reaction.reverse_id]] = -coefficient
-            if coefficients == expected:
-                continue
-
         for variable in affected:
             coefficient = coefficients[variable]
             if (constraint.lb is not None and coefficient > 0) or (
@@ -91,18 +95,31 @@ def _total_flux(model: "Model") -> "optlang.symbolics.Basic":
     )
 
 
-def _add_loopless_objective_bounds(
+def create_loopless_model(
+    model: "Model", method: str, cyclic_reactions: List[str]
+) -> "Model":
+    """Return a copy of the model with loopless constraints.
+
+    Without cyclic reactions, no constraints are needed and the model itself
+    is returned.
+    """
+    if not cyclic_reactions:
+        return model
+    loopless_model = model.copy()
+    add_loopless(loopless_model, method=method, reactions=cyclic_reactions)
+    return loopless_model
+
+
+def add_loopless_objective_bounds(
     model: "Model",
     loopless_model: "Model",
     fraction_of_optimum: Optional[float],
     pfba_factor: Optional[float],
 ) -> None:
-    """Compute loopless reference values and add the same bounds to both models.
+    """Bound the objective and the total flux of both models by loopless optima.
 
-    The original objective is constrained before minimizing the total flux.
-    Only reaction variables enter the flux sum. Loopless auxiliary variables
-    are excluded. If both arguments refer to the same model, add each bound
-    only once.
+    The optima are computed with `loopless_model`, the minimal total flux
+    after the objective has been bounded.
     """
     models = [model] if model is loopless_model else [model, loopless_model]
     if fraction_of_optimum is not None:
@@ -110,13 +127,13 @@ def _add_loopless_objective_bounds(
             error_value=None,
             message="There is no optimal solution for the chosen loopless objective!",
         )
-        for target in models:
-            bound = fraction_of_optimum * optimum
-            maximize = target.objective.direction == "max"
-            target.add_cons_vars(
+        bound = fraction_of_optimum * optimum
+        for bounded_model in models:
+            maximize = bounded_model.objective.direction == "max"
+            bounded_model.add_cons_vars(
                 [
-                    target.problem.Constraint(
-                        target.objective.expression,
+                    bounded_model.problem.Constraint(
+                        bounded_model.objective.expression,
                         lb=bound if maximize else None,
                         ub=None if maximize else bound,
                         name="fva_old_objective_constraint",
@@ -132,11 +149,11 @@ def _add_loopless_objective_bounds(
                 _total_flux(loopless_model), direction="min"
             )
             minimum_sum = loopless_model.slim_optimize(error_value=None)
-        for target in models:
-            target.add_cons_vars(
+        for bounded_model in models:
+            bounded_model.add_cons_vars(
                 [
-                    target.problem.Constraint(
-                        _total_flux(target),
+                    bounded_model.problem.Constraint(
+                        _total_flux(bounded_model),
                         ub=pfba_factor * minimum_sum,
                         name="flux_sum_constraint",
                     )
@@ -144,42 +161,17 @@ def _add_loopless_objective_bounds(
             )
 
 
-def create_loopless_model(
-    model: "Model",
-    method: str,
-    cyclic_reactions: List[str],
-    fraction_of_optimum: Optional[float],
-    pfba_factor: Optional[float],
-) -> "Model":
-    """Return a copy of the model with loopless constraints.
-
-    The objective and the total flux are bounded in both models. Without
-    cyclic reactions, no constraints are needed and the model itself is
-    returned.
-    """
-    loopless_model = model
-    if cyclic_reactions:
-        loopless_model = model.copy()
-        add_loopless(loopless_model, method=method, reactions=cyclic_reactions)
-    _add_loopless_objective_bounds(
-        model, loopless_model, fraction_of_optimum, pfba_factor
-    )
-    if loopless_model is not model:
-        loopless_model.objective = Zero
-    return loopless_model
-
-
 def _set_mip_gap(model: "Model", mip_gap: float) -> None:
     """Set the MIP gap of CPLEX or Gurobi until the model context exits."""
-    if model.problem is getattr(optlang, "cplex_interface", None):
-        parameter = model.solver.problem.parameters.mip.tolerances.mipgap
+    solver = sutil.interface_to_str(model.problem)
+    problem = model.solver.problem
+    if solver == "cplex":
+        parameter = problem.parameters.mip.tolerances.mipgap
         reset = partial(parameter.set, parameter.get())
         parameter.set(mip_gap)
-    elif model.problem is getattr(optlang, "gurobi_interface", None):
-        reset = partial(
-            model.solver.problem.setParam, "MIPGap", model.solver.problem.Params.MIPGap
-        )
-        model.solver.problem.Params.MIPGap = mip_gap
+    elif solver == "gurobi":
+        reset = partial(problem.setParam, "MIPGap", problem.Params.MIPGap)
+        problem.Params.MIPGap = mip_gap
     else:
         return
     context = get_context(model)
@@ -234,7 +226,10 @@ class ClippedFluxScreening:
         self._any_remaining.set_linear_coefficients(coefficients)
 
     def next_candidates(self) -> List[Tuple[str, str]]:
-        """Solve the problem and return the targets that carry flux."""
+        """Solve the problem and return the targets that carry flux.
+
+        The list is empty once none of the remaining targets can carry flux.
+        """
         if not self._remaining:
             return []
         self._model.slim_optimize()
@@ -259,15 +254,14 @@ class ClippedFluxScreening:
         self._any_remaining.set_linear_coefficients(found)
         return candidates
 
-    def fix_inactive_directions(self, model: "Model") -> None:
+    def close_inactive_directions(self, model: "Model") -> None:
         """Close the directions without flux in the last solution.
 
-        All flux distributions of a model without loopless constraints are
-        loopless once its cyclic reactions are restricted to these directions.
+        The given model then has no loops, even without loopless constraints.
         """
         for reaction_id, direction in self._inactive:
             reaction = model.reactions.get_by_id(reaction_id)
             if direction == "maximum":
-                reaction.upper_bound = 0.0
+                reaction.upper_bound = min(reaction.upper_bound, 0.0)
             else:
-                reaction.lower_bound = 0.0
+                reaction.lower_bound = max(reaction.lower_bound, 0.0)

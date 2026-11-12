@@ -5,6 +5,7 @@ from typing import List
 import pytest
 
 from cobra import Model
+from cobra.exceptions import Infeasible
 from cobra.flux_analysis import find_blocked_reactions
 
 
@@ -25,6 +26,20 @@ def test_find_blocked_reactions(model: Model, all_solvers: List[str]) -> None:
 
     result = find_blocked_reactions(model, model.reactions[30:50], open_exchanges=True)
     assert result == []
+
+
+def test_find_blocked_reactions_without_clip(model: Model) -> None:
+    """Test find_blocked_reactions() without clipping the fluxes."""
+    result = find_blocked_reactions(model, abs_flux_clip=None)
+    assert result == find_blocked_reactions(model)
+    assert result.forward_blocked == find_blocked_reactions(model).forward_blocked
+
+
+def test_find_blocked_reactions_infeasible(model: Model) -> None:
+    """Test find_blocked_reactions() with an infeasible model."""
+    model.reactions.get_by_id("EX_glc__D_e").lower_bound = 0
+    with pytest.raises(Infeasible):
+        find_blocked_reactions(model)
 
 
 def test_find_blocked_reactions_cycle_free_flux_unsupported(model: Model) -> None:

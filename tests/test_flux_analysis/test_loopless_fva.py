@@ -40,7 +40,7 @@ def test_clipped_flux_screening(ll_test_model: Model) -> None:
         while candidates:
             found.extend(candidates)
             with validation_model:
-                screening.fix_inactive_directions(validation_model)
+                screening.close_inactive_directions(validation_model)
                 assert validation_model.reactions.v3.bounds == (0.0, 0.0)
             candidates = screening.next_candidates()
 

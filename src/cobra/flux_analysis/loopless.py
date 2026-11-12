@@ -37,17 +37,11 @@ def _warn_about_integrality_tolerance(
         or max_bound * integrality_tolerance >= flux_threshold * 0.5
     ):
         warn(
-            "Loopless constraints may not work properly "
-            f"with the provided `flux_threshold`={flux_threshold}, "
-            f"maximum model bound={max_bound}, and solver integrality "
-            f"tolerance={integrality_tolerance}. "
-            "This can happen due to numerical instability. "
-            "Possible remedies are increasing `flux_threshold`, "
-            "decreasing the maximum model bound, "
-            "switching to a different solver, "
-            "or decreasing the solver `integrality` tolerance. "
-            "Please carefully read the note on numerical instability "
-            "in the `add_loopless` function documentation.",
+            f"The `flux_threshold` of {flux_threshold} is not well above the "
+            f"product of the maximum bound ({max_bound}) and the integrality "
+            f"tolerance of the solver ({integrality_tolerance}), so inactive "
+            "indicators may not block fluxes reliably. Please see the notes "
+            "of `add_loopless`.",
             UserWarning,
         )
 
@@ -97,20 +91,20 @@ def add_loopless(
         The list of reaction IDs to constrain. All cycles within these
         reactions will be removed. If `None`, all reactions will be constrained.
     flux_threshold : float, optional
-        Minimum flux required when a directional indicator variable is active.
-        If provided, separate forward and reverse indicator variables are
-        added for each constrained reaction. This is intended for analyses
-        that need to distinguish feasible loopless directions.
+        If provided, each constrained reaction gets one binary indicator
+        per direction, ``indicator_maximum_<id>`` and
+        ``indicator_minimum_<id>``, instead of a single one. An active
+        indicator requires a flux of at least `flux_threshold` in its
+        direction (default None).
 
     Notes
     -----
-    When `flux_threshold` is provided, the directional formulation strongly
-    relies on binary indicator variables. If the product of the maximum model
-    bound and the solver integrality tolerance is close to `flux_threshold`,
-    numerical tolerances can make inactive directions appear feasible.
-    Increasing `flux_threshold`, decreasing the maximum model bound,
-    lowering the solver integrality tolerance, or using a different MILP
-    solver can reduce this risk.
+    An inactive indicator may still take a value up to the integrality
+    tolerance of the solver, which permits a flux of that tolerance times the
+    bound of the reaction. With `flux_threshold`, this product has to stay
+    well below the threshold. If it does not, increase `flux_threshold`, lower
+    the integrality tolerance, or reduce large bounds, for instance with
+    :func:`cobra.manipulation.clip_reaction_bounds`.
 
     References
     ----------
@@ -145,10 +139,15 @@ def add_loopless(
         return
 
     s_int = create_stoichiometric_matrix(model)[:, np.array(reactions_to_constrain)]
-    s_int = s_int[np.sum(np.abs(s_int) > zero_cutoff, -1) > 0, :]
+    s_int = s_int[(np.abs(s_int) > zero_cutoff).any(axis=1)]
     constrained_reactions = [model.reactions[i] for i in reactions_to_constrain]
 
     max_bound = max(1000.0, max(max(abs(b) for b in r.bounds) for r in model.reactions))
+    if np.isinf(max_bound):
+        raise ValueError(
+            "Loopless constraints require finite reaction bounds. Infinite "
+            "bounds can be replaced with `cobra.manipulation.clip_reaction_bounds`."
+        )
 
     if flux_threshold is not None:
         _warn_about_integrality_tolerance(model, flux_threshold, max_bound)
@@ -159,18 +158,13 @@ def add_loopless(
         if method == "original":
             n_int = nullspace(s_int).T
         else:
-            bounds_int = np.array(
-                [model.reactions[i].bounds for i in reactions_to_constrain]
-            )
-            directions_int = np.sign(bounds_int)
+            directions_int = np.sign([rxn.bounds for rxn in constrained_reactions])
             n_int = nullspace_fast_snp(
-                model.problem,
-                s_int,
-                directions_int,
-                zero_cutoff=zero_cutoff,
+                model.problem, s_int, directions_int, zero_cutoff=zero_cutoff
             ).T
         if flux_threshold is None:
             # Reactions outside of the nullspace cannot be part of a loop.
+            # With `flux_threshold` they still get their directional indicators.
             in_nullspace = (np.abs(n_int) > zero_cutoff).any(axis=0)
             n_int = n_int[:, in_nullspace]
             constrained_reactions = [
@@ -205,7 +199,8 @@ def _add_cycle_free(model: "Model", fluxes: Dict[str, float]) -> None:
     )
     objective_vars = []
     for rxn in model.reactions:
-        flux = fluxes[rxn.id]
+        # The solver may violate the bounds within its tolerance.
+        flux = min(max(fluxes[rxn.id], rxn.lower_bound), rxn.upper_bound)
         if rxn.boundary:
             rxn.bounds = (flux, flux)
             continue

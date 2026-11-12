@@ -1,4 +1,4 @@
-"""Provides a function to find blocked reactions in a model."""
+"""Provide a function to find blocked reactions in a model."""
 
 import logging
 from typing import TYPE_CHECKING, List, Optional, Union
@@ -19,13 +19,7 @@ configuration = Configuration()
 
 
 class BlockedReactionsResult(list[str]):
-    """Result of blocked reactions analysis.
-
-    Behaves as a list of fully blocked reaction identifiers for backward
-    compatibility. Fully blocked reactions are blocked in both the forward
-    and reverse directions. Direction-specific blocked reactions are also
-    available through the ``forward_blocked`` and ``reverse_blocked``
-    attributes.
+    """List of the identifiers of reactions that are blocked in both directions.
 
     Attributes
     ----------
@@ -35,9 +29,12 @@ class BlockedReactionsResult(list[str]):
         Identifiers of reactions that cannot carry negative flux.
     """
 
-    def __init__(self, forward_blocked, reverse_blocked):
-        """Initialize blocked reactions result."""
-        super().__init__(list(set(forward_blocked) & set(reverse_blocked)))
+    def __init__(self, forward_blocked: List[str], reverse_blocked: List[str]) -> None:
+        """Initialize the list from the reactions blocked in each direction."""
+        reverse_blocked_set = set(reverse_blocked)
+        super().__init__(
+            rxn_id for rxn_id in forward_blocked if rxn_id in reverse_blocked_set
+        )
         self.forward_blocked = forward_blocked
         self.reverse_blocked = reverse_blocked
 
@@ -104,11 +101,9 @@ def find_blocked_reactions(
         List of reactions to consider, the default includes all model
         reactions (default None).
     loopless : str, "fastSNP" or "potentials", optional
-        If set, only loopless flux distributions are considered when checking
-        whether reactions can carry flux. The value is passed to
-        :func:`flux_variability_analysis` as its loopless method. Supported
-        values are ``"fastSNP"`` and ``"potentials"`` (default None).
-        See :func:`flux_variability_analysis` for more details.
+        If set, a reaction also counts as blocked if it can only carry flux
+        in a loop. The value selects the loopless method of
+        :func:`flux_variability_analysis` (default None).
     zero_cutoff : float, optional
         Flux value which is considered to effectively be zero. The default
         is set to use `model.tolerance` (default None).
@@ -116,7 +111,8 @@ def find_blocked_reactions(
         Whether or not to open all exchange reactions to very high flux
         ranges (default False).
     abs_flux_clip : float, optional
-        Maximum absolute flux value passed to
+        Fluxes are only optimized up to this absolute value, which must not
+        be smaller than `zero_cutoff`, see
         :func:`flux_variability_analysis` (default 0.1).
     processes : int, optional
         The number of parallel processes to run. Can speed up the
@@ -152,15 +148,14 @@ def find_blocked_reactions(
 
     if abs_flux_clip is not None and abs_flux_clip < zero_cutoff:
         raise ValueError(
-            "The `abs_flux_clip` argument must be bigger than `zero_cutoff`."
+            "The `abs_flux_clip` argument must not be smaller than `zero_cutoff`."
         )
 
     with model:
-        max_bound = max(
-            1000.0, max(max(abs(b) for b in r.bounds) for r in model.reactions)
-        )
-
         if open_exchanges:
+            max_bound = max(
+                1000.0, max(max(abs(b) for b in r.bounds) for r in model.reactions)
+            )
             for reaction in model.exchanges:
                 reaction.bounds = (
                     min(reaction.lower_bound, -max_bound),
@@ -172,25 +167,25 @@ def find_blocked_reactions(
         else:
             reaction_list = model.reactions.get_by_any(reaction_list)
 
+        model.slim_optimize(
+            error_value=None,
+            message="There is no optimal solution for the chosen objective!",
+        )
         if loopless is None:
-            # Limit the search space to reactions which have zero flux.
-            # If the reactions already carry flux in this solution,
-            # the active direction is known to be feasible and only
-            # the opposite direction needs to be checked.
-            model.slim_optimize()
+            # A direction that clearly carries flux in this solution is not
+            # blocked, so only the other directions need to be checked.
             solution = get_solution(model, reactions=reaction_list)
+            clear_flux = zero_cutoff if abs_flux_clip is None else 10 * abs_flux_clip
             forward_unknown = solution.fluxes[
-                solution.fluxes < 10 * abs_flux_clip
+                solution.fluxes < clear_flux
             ].index.tolist()
             reverse_unknown = solution.fluxes[
-                solution.fluxes > -10 * abs_flux_clip
+                solution.fluxes > -clear_flux
             ].index.tolist()
             reaction_list = [
                 (reaction_id, "maximum") for reaction_id in forward_unknown
             ] + [(reaction_id, "minimum") for reaction_id in reverse_unknown]
 
-        # Run FVA to find reactions where both the minimal and maximal flux
-        # are zero (below the cut off).
         flux_span = flux_variability_analysis(
             model,
             reaction_list=reaction_list,
@@ -201,11 +196,9 @@ def find_blocked_reactions(
         )
         _warn_near_zero_cutoff_fluxes(flux_span, zero_cutoff)
 
-        forward_blocked = flux_span[
-            flux_span["maximum"].notna() & (flux_span["maximum"] < zero_cutoff)
-        ].index.tolist()
-        reverse_blocked = flux_span[
-            flux_span["minimum"].notna() & (flux_span["minimum"] > -zero_cutoff)
-        ].index.tolist()
+        # A direction is blocked if its flux bound is below the cutoff. Bounds
+        # that were not computed are NaN and compare as False.
+        forward_blocked = flux_span.index[flux_span["maximum"] < zero_cutoff].tolist()
+        reverse_blocked = flux_span.index[flux_span["minimum"] > -zero_cutoff].tolist()
 
         return BlockedReactionsResult(forward_blocked, reverse_blocked)

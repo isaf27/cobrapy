@@ -1,6 +1,6 @@
 """Test functionalities of removing loops in model."""
 
-from typing import Callable
+from typing import Callable, Optional
 from unittest.mock import DEFAULT
 
 import pytest
@@ -87,7 +87,7 @@ def test_loopless_fva_solution_removes_unrelated_cycle(
 @pytest.mark.parametrize("method", ["fastSNP", "potentials", "original"])
 @pytest.mark.parametrize("flux_threshold", [None, 1e-2])
 def test_add_loopless(
-    ll_test_model: Model, method: str, flux_threshold: float | None
+    ll_test_model: Model, method: str, flux_threshold: Optional[float]
 ) -> None:
     """Test add_loopless()."""
     add_loopless(ll_test_model, method=method, flux_threshold=flux_threshold)
@@ -97,6 +97,13 @@ def test_add_loopless(
     infeasible_status = ll_test_model.solver.status
     assert feasible_status == OPTIMAL
     assert infeasible_status == INFEASIBLE
+
+
+def test_add_loopless_infinite_bounds(ll_test_model: Model) -> None:
+    """Test add_loopless() with an infinite reaction bound."""
+    ll_test_model.reactions.v1.upper_bound = float("inf")
+    with pytest.raises(ValueError, match="clip_reaction_bounds"):
+        add_loopless(ll_test_model)
 
 
 def test_add_loopless_acyclic(ll_test_model: Model) -> None:

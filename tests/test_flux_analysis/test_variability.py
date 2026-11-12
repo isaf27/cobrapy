@@ -113,8 +113,13 @@ def test_flux_variability_directional_reactions(model: Model) -> None:
     assert directional.at["FUM", "maximum"] == pytest.approx(full.at["FUM", "maximum"])
 
 
-def test_flux_variability_abs_flux_clip(model: Model, all_solvers: List[str]) -> None:
+@pytest.mark.parametrize("processes", [1, 2])
+def test_flux_variability_abs_flux_clip(
+    model: Model, all_solvers: List[str], processes: int
+) -> None:
     """Test FVA with clipped absolute flux values."""
+    if processes > 1 and "SKIP_MP" in os.environ:
+        pytest.skip("unsafe for parallel execution")
     model.solver = all_solvers
     abs_flux_clip = 10.0
 
@@ -129,7 +134,7 @@ def test_flux_variability_abs_flux_clip(model: Model, all_solvers: List[str]) ->
         model,
         fraction_of_optimum=None,
         abs_flux_clip=abs_flux_clip,
-        processes=1,
+        processes=processes,
     )
 
     assert np.allclose(clipped_fva_out, expected)
@@ -144,31 +149,6 @@ def test_parallel_flux_variability(
     fva_out = flux_variability_analysis(model, processes=2)
     fva_out.sort_index(inplace=True)
     assert np.allclose(fva_out, fva_results)
-
-
-@pytest.mark.skipif("SKIP_MP" in os.environ, reason="unsafe for parallel execution")
-def test_parallel_flux_variability_abs_flux_clip(
-    model: Model, all_solvers: List[str]
-) -> None:
-    """Test parallel FVA with clipped absolute flux values."""
-    model.solver = all_solvers
-    abs_flux_clip = 10.0
-
-    fva_out = flux_variability_analysis(
-        model,
-        fraction_of_optimum=None,
-        processes=1,
-    )
-    expected = fva_out.clip(lower=-abs_flux_clip, upper=abs_flux_clip)
-
-    clipped_fva_out = flux_variability_analysis(
-        model,
-        fraction_of_optimum=None,
-        abs_flux_clip=abs_flux_clip,
-        processes=2,  # run in parallel
-    )
-
-    assert np.allclose(clipped_fva_out, expected)
 
 
 # Loopless FVA
@@ -259,6 +239,27 @@ def test_flux_variability_loopless_abs_flux_clip(
     )
 
     assert np.allclose(clipped_fva_out, expected)
+
+
+@pytest.mark.parametrize("loopless", ["fastSNP", "potentials"])
+def test_flux_variability_loopless_additional_constraint(
+    ll_test_model: Model, loopless: str
+) -> None:
+    """A constraint that depends on a loop also limits reactions outside of it."""
+    model = ll_test_model
+    # Without loopless constraints, half of the flux through v1 and v2 can
+    # leave through DM_C while the other half returns through v3.
+    demand_requires_loop = model.problem.Constraint(
+        model.reactions.DM_C.flux_expression - model.reactions.v3.flux_expression,
+        ub=0,
+    )
+    model.add_cons_vars([demand_requires_loop])
+
+    fva_out = flux_variability_analysis(
+        model, ["DM_C"], loopless=loopless, fraction_of_optimum=None, processes=1
+    )
+
+    assert fva_out.at["DM_C", "maximum"] == pytest.approx(0.0, abs=1e-6)
 
 
 # Internals (essentiality)
@@ -436,7 +437,9 @@ def test_fva_all_fluxes_precomputed(
     # Exercise the actual precomputation; a silent fallback must not pass.
     for direction, rxn_id in [("maximum", "v1"), ("minimum", "v2")]:
         pd.testing.assert_series_equal(
-            fluxes[direction].loc[rxn_id], search.spy_return[direction][rxn_id]
+            fluxes[direction].loc[rxn_id],
+            search.spy_return[direction][rxn_id],
+            check_names=False,
         )
     for frame in fluxes.values():
         assert np.allclose(frame["v3"], 0.0, atol=1e-6)
@@ -444,6 +447,30 @@ def test_fva_all_fluxes_precomputed(
         assert np.allclose(frame["DM_C"], 1000.0)
         assert np.allclose(frame["v1"], 1000.0)
         assert np.allclose(frame["v2"], -1000.0)
+
+
+@pytest.mark.parametrize("loopless", ["fastSNP", "potentials"])
+def test_fva_all_fluxes_precomputed_respects_bounds(
+    ll_test_model: Model, loopless: str
+) -> None:
+    """Distributions of clipped reactions keep the forced flux of a cyclic reaction."""
+    model = ll_test_model
+    model.reactions.v1.lower_bound = 1.0
+    parallel = Reaction("parallel")
+    parallel.add_metabolites({model.metabolites.A: -1, model.metabolites.B: 1})
+    model.add_reactions([parallel])
+
+    _, fluxes = flux_variability_analysis(
+        model,
+        [("parallel", "max")],
+        loopless=loopless,
+        fraction_of_optimum=None,
+        abs_flux_clip=0.5,
+        processes=1,
+        all_fluxes=True,
+    )
+
+    assert fluxes["maximum"].at["parallel", "v1"] >= 1.0 - model.tolerance
 
 
 @pytest.mark.parametrize("reaction_list", [[], [("FUM", "max")]])
