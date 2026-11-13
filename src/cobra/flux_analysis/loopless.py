@@ -1,6 +1,7 @@
 """Provide functions to remove thermodynamically infeasible loops."""
 
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from warnings import warn
 
 import numpy as np
 from optlang.symbolics import Zero
@@ -10,10 +11,39 @@ from ..util import create_stoichiometric_matrix, nullspace
 from .fast_snp import nullspace_fast_snp
 from .find_cyclic_reactions import find_cyclic_reactions
 from .helpers import normalize_cutoff
+from .loopless_constraints import (
+    add_directional_indicators,
+    add_indicators,
+    add_nullspace_energies,
+    add_potential_energies,
+)
 
 
 if TYPE_CHECKING:
     from cobra import Model, Reaction, Solution
+
+
+def _warn_about_integrality_tolerance(
+    model: "Model", flux_threshold: float, max_bound: float
+) -> None:
+    """Warn if inactive indicators may allow a flux close to `flux_threshold`."""
+    # Not all solver interfaces expose this tolerance.
+    integrality_tolerance = getattr(
+        model.solver.configuration.tolerances, "integrality", None
+    )
+
+    if (
+        integrality_tolerance is None
+        or max_bound * integrality_tolerance >= flux_threshold * 0.5
+    ):
+        warn(
+            f"The `flux_threshold` of {flux_threshold} is not well above the "
+            f"product of the maximum bound ({max_bound}) and the integrality "
+            f"tolerance of the solver ({integrality_tolerance}), so inactive "
+            "indicators may not block fluxes reliably. Please see the notes "
+            "of `add_loopless`.",
+            UserWarning,
+        )
 
 
 def add_loopless(
@@ -21,19 +51,23 @@ def add_loopless(
     zero_cutoff: Optional[float] = None,
     method: str = "fastSNP",
     reactions: Optional[List[str]] = None,
+    flux_threshold: Optional[float] = None,
 ) -> None:
     """Modify a model so all feasible flux distributions are loopless.
 
     It adds variables and constraints to a model which will disallow flux
     distributions with loops. This function *will* modify your model.
 
-    The used formulation is described in [1]_. If `method` is set to
-    "fastSNP", it uses a faster implementation based on the Fast-SNP
-    algorithm [2]_.
+    If `method` is set to "original" or "fastSNP" the used formulation
+    is described in [1]_. If `method` is set to "fastSNP", it uses a
+    faster implementation based on the Fast-SNP algorithm [2]_.
+
+    If `method` is set to "potentials", it uses metabolite potential
+    variables instead of nullspace-based constraints.
 
     In most cases you probably want to use the much faster
     `loopless_solution`. May be used in cases where you want to add complex
-    constraints and objecives (for instance quadratic objectives) to the
+    constraints and objectives (for instance quadratic objectives) to the
     model afterwards or use an approximation of Gibbs free energy directions
     in your model.
 
@@ -45,14 +79,32 @@ def add_loopless(
         Cutoff used for null space. Coefficients with an absolute value
         smaller than `zero_cutoff` are considered to be zero. The default
         uses the `model.tolerance` (default None).
-    method : str, "original" or "fastSNP", optional
-        The method to use for finding the null space. The "original" method
-        uses the original method from [1]_, while "fastSNP" uses a faster
-        implementation based on the FastSNP algorithm. The "fastSNP" method
-        is much faster and should be used in most cases.
+    method : str, "original", "fastSNP", or "potentials", optional
+        The method used to add loopless constraints. The "original" method
+        uses the original nullspace formulation from [1]_, while "fastSNP"
+        uses a faster nullspace implementation based on the FastSNP
+        algorithm. The "potentials" method adds constraints based on
+        metabolite potential variables. The "fastSNP" and "potentials"
+        methods are much faster in most cases, with relative performance
+        depending on the model and optimization problem.
     reactions : list of str, optional
         The list of reaction IDs to constrain. All cycles within these
         reactions will be removed. If `None`, all reactions will be constrained.
+    flux_threshold : float, optional
+        If provided, each constrained reaction gets one binary indicator
+        per direction, ``indicator_maximum_<id>`` and
+        ``indicator_minimum_<id>``, instead of a single one. An active
+        indicator requires a flux of at least `flux_threshold` in its
+        direction (default None).
+
+    Notes
+    -----
+    An inactive indicator may still take a value up to the integrality
+    tolerance of the solver, which permits a flux of that tolerance times the
+    bound of the reaction. With `flux_threshold`, this product has to stay
+    well below the threshold. If it does not, increase `flux_threshold`, lower
+    the integrality tolerance, or reduce large bounds, for instance with
+    :func:`cobra.manipulation.clip_reaction_bounds`.
 
     References
     ----------
@@ -64,12 +116,12 @@ def add_loopless(
        loopless flux optimization of metabolic models. Saa PA, Nielsen LK.
        Bioinformatics. 2016 Dec;32(24):3807–3814. doi: 10.1093/bioinformatics/btw555.
     """
-    if method not in ["original", "fastSNP"]:
+    if method not in ["original", "fastSNP", "potentials"]:
         raise ValueError(f"unsupported method: {method}")
 
     zero_cutoff = normalize_cutoff(model, zero_cutoff)
 
-    if reactions is None and method == "fastSNP":
+    if reactions is None and method != "original":
         reactions = find_cyclic_reactions(model, zero_cutoff=zero_cutoff)[0]
 
     reactions_to_constrain = [
@@ -87,67 +139,47 @@ def add_loopless(
         return
 
     s_int = create_stoichiometric_matrix(model)[:, np.array(reactions_to_constrain)]
+    s_int = s_int[(np.abs(s_int) > zero_cutoff).any(axis=1)]
+    constrained_reactions = [model.reactions[i] for i in reactions_to_constrain]
 
-    if method == "original":
-        n_int = nullspace(s_int).T
-    elif method == "fastSNP":
-        bounds_int = np.array(
-            [model.reactions[i].bounds for i in reactions_to_constrain]
+    max_bound = max(1000.0, max(max(abs(b) for b in r.bounds) for r in model.reactions))
+    if np.isinf(max_bound):
+        raise ValueError(
+            "Loopless constraints require finite reaction bounds. Infinite "
+            "bounds can be replaced with `cobra.manipulation.clip_reaction_bounds`."
         )
-        directions_int = np.sign(bounds_int)
-        v_bound = np.max(np.abs(bounds_int))
-        n_int = nullspace_fast_snp(
-            model.problem,
-            s_int,
-            directions_int,
-            v_bound=v_bound,
-            zero_cutoff=zero_cutoff,
-        ).T
+
+    if flux_threshold is not None:
+        _warn_about_integrality_tolerance(model, flux_threshold, max_bound)
+
+    if method == "potentials":
+        energies = add_potential_energies(model, s_int, zero_cutoff)
     else:
-        raise ValueError(f"unsupported method: {method}")
-
-    max_bound = max(max(abs(b) for b in r.bounds) for r in model.reactions)
-    prob = model.problem
-
-    # Add indicator variables and new constraints
-    to_add = []
-    for i, ridx in enumerate(reactions_to_constrain):
-        if not (np.abs(n_int[:, i]) > zero_cutoff).any():
-            continue
-
-        rxn = model.reactions[ridx]
-        # indicator variable a_i
-        indicator = prob.Variable(f"indicator_{rxn.id}", type="binary")
-        # -M*(1 - a_i) <= v_i <= M*a_i
-        on_off_constraint = prob.Constraint(
-            rxn.flux_expression - max_bound * indicator,
-            lb=-max_bound,
-            ub=0,
-            name=f"on_off_{rxn.id}",
+        if method == "original":
+            n_int = nullspace(s_int).T
+        else:
+            directions_int = np.sign([rxn.bounds for rxn in constrained_reactions])
+            n_int = nullspace_fast_snp(
+                model.problem, s_int, directions_int, zero_cutoff=zero_cutoff
+            ).T
+        if flux_threshold is None:
+            # Reactions outside of the nullspace cannot be part of a loop.
+            # With `flux_threshold` they still get their directional indicators.
+            in_nullspace = (np.abs(n_int) > zero_cutoff).any(axis=0)
+            n_int = n_int[:, in_nullspace]
+            constrained_reactions = [
+                rxn for rxn, keep in zip(constrained_reactions, in_nullspace) if keep
+            ]
+        energies = add_nullspace_energies(
+            model, constrained_reactions, n_int, zero_cutoff
         )
-        # -(max_bound + 1) * a_i + 1 <= G_i <= -(max_bound + 1) * a_i + 1000
-        delta_g = prob.Variable(f"delta_g_{rxn.id}")
-        delta_g_range = prob.Constraint(
-            delta_g + (max_bound + 1) * indicator,
-            lb=1,
-            ub=max_bound,
-            name=f"delta_g_range_{rxn.id}",
+
+    if flux_threshold is None:
+        add_indicators(model, constrained_reactions, energies, max_bound)
+    else:
+        add_directional_indicators(
+            model, constrained_reactions, energies, max_bound, flux_threshold
         )
-        to_add.extend([indicator, on_off_constraint, delta_g, delta_g_range])
-
-    model.add_cons_vars(to_add)
-
-    # Add nullspace constraints for G_i
-    for i, row in enumerate(n_int):
-        name = f"nullspace_constraint_{str(i)}"
-        nullspace_constraint = prob.Constraint(Zero, lb=0, ub=0, name=name)
-        model.add_cons_vars([nullspace_constraint])
-        coefs = {
-            model.variables[f"delta_g_{model.reactions[ridx].id}"]: row[i]
-            for i, ridx in enumerate(reactions_to_constrain)
-            if abs(row[i]) > zero_cutoff
-        }
-        model.constraints[name].set_linear_coefficients(coefs)
 
 
 def _add_cycle_free(model: "Model", fluxes: Dict[str, float]) -> None:
@@ -167,7 +199,8 @@ def _add_cycle_free(model: "Model", fluxes: Dict[str, float]) -> None:
     )
     objective_vars = []
     for rxn in model.reactions:
-        flux = fluxes[rxn.id]
+        # The solver may violate the bounds within its tolerance.
+        flux = min(max(fluxes[rxn.id], rxn.lower_bound), rxn.upper_bound)
         if rxn.boundary:
             rxn.bounds = (flux, flux)
             continue
@@ -307,12 +340,10 @@ def loopless_fva_iter(
     if current is None:
         return None
 
-    # boundary reactions can not be part of cycles
-    if reaction.boundary:
-        if solution:
-            return sol
-        else:
-            return current
+    # Boundary reactions cannot be part of cycles, but their full solutions
+    # can still contain cycles elsewhere in the model.
+    if reaction.boundary and not solution:
+        return current
 
     with model:
         _add_cycle_free(model, sol.fluxes)
@@ -322,7 +353,7 @@ def loopless_fva_iter(
         # loopless and we are done
         if abs(reaction.flux - current) < zero_cutoff:
             if solution:
-                return sol
+                return get_solution(model)
             return current
 
         # If previous optimum was not in the loopless solution create a new
