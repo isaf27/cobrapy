@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from cobra import Metabolite, Model, Reaction
-from cobra.exceptions import Infeasible
+from cobra.exceptions import Infeasible, OptimizationError
 from cobra.flux_analysis.loopless import add_loopless
 from cobra.flux_analysis.variability import (
     find_essential_genes,
@@ -162,6 +162,17 @@ def test_flux_variability_abs_flux_clip_keeps_solver(
         model, fraction_of_optimum=None, abs_flux_clip=0.1, processes=1
     )
     assert model.slim_optimize() == pytest.approx(optimum)
+
+
+def test_flux_variability_abs_flux_clip_iteration_limit(model: Model) -> None:
+    """Clipped FVA does not take another abort of CPLEX for reaching the clip."""
+    pytest.importorskip("cplex")
+    model.solver = "cplex"
+    model.solver.problem.parameters.simplex.limits.iterations.set(1)
+    with pytest.raises(OptimizationError):
+        flux_variability_analysis(
+            model, fraction_of_optimum=None, abs_flux_clip=5.0, processes=1
+        )
 
 
 @pytest.mark.skipif("SKIP_MP" in os.environ, reason="unsafe for parallel execution")

@@ -110,8 +110,8 @@ def find_blocked_reactions(
         Whether or not to open all exchange reactions to very high flux
         ranges (default False).
     abs_flux_clip : float, optional
-        Fluxes are only optimized up to this absolute value, which must not
-        be smaller than `zero_cutoff`, see
+        Flux bounds are only determined up to this absolute value, which
+        must not be smaller than `zero_cutoff`, see
         :func:`flux_variability_analysis` (default 0.1).
     processes : int, optional
         The number of parallel processes to run. Can speed up the

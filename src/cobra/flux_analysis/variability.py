@@ -6,7 +6,6 @@ from warnings import warn
 
 import numpy as np
 import pandas as pd
-from optlang.interface import ABORTED
 from optlang.symbolics import Zero
 
 from ..core import Configuration, get_solution
@@ -84,8 +83,9 @@ def _init_abs_flux_clip_target(abs_flux_clip: Optional[float], sense: str) -> No
 def _set_objective_limit(model: "Model", sense: str, limit: Optional[float]) -> bool:
     """Let the solver stop a linear program once the objective reaches a limit.
 
+    The limit is `limit` for a maximization and `-limit` for a minimization.
     Only the primal simplex of CPLEX supports this. Without a limit, the
-    defaults of CPLEX are restored. Returns whether the solver uses the limit.
+    defaults of CPLEX are restored. Returns whether a limit was set.
     """
     if sutil.interface_to_str(model.problem) != "cplex":
         return False
@@ -99,6 +99,12 @@ def _set_objective_limit(model: "Model", sense: str, limit: Optional[float]) -> 
     else:
         limits.lowerobj.set(-limit)
     return True
+
+
+def _stopped_at_objective_limit(model: "Model") -> bool:
+    """Return whether CPLEX stopped because the objective reached its limit."""
+    solution = model.solver.problem.solution
+    return solution.get_status() == solution.status.abort_obj_limit
 
 
 def _init_worker(
@@ -137,11 +143,14 @@ def _init_worker(
 
     # The clip target bounds the objective of a MILP. It slows a linear
     # program down, which is clipped after the optimization instead.
+    # Pending changes, such as removed loopless variables, are applied first.
+    _model.solver.update()
     is_milp = _model.solver.is_integer
     _init_abs_flux_clip_target(
         abs_flux_clip if is_milp and not loopless else None, sense
     )
-    # A stopped optimization has no optimal flux distribution to return.
+    # The limit only applies to linear programs, and a stopped optimization
+    # has no optimal flux distribution to return.
     stop_at_clip = abs_flux_clip is not None and not (is_milp or loopless or all_fluxes)
     _stops_at_clip = _set_objective_limit(
         _model, sense, abs_flux_clip if stop_at_clip else None
@@ -151,7 +160,7 @@ def _init_worker(
 def _set_objective_coefficient(rxn: "Reaction", coefficient: int) -> None:
     """Set the coefficient of the flux of a reaction in the global objective.
 
-    With clipping, the objective is the clip target, which is tied to the flux.
+    With a clip target, the objective is the target, which is tied to the flux.
     """
     if _abs_flux_clip_target is None:
         _model.solver.objective.set_linear_coefficients(
@@ -200,8 +209,8 @@ def _fva_step(reaction_id: str) -> Tuple[str, float, Optional[pd.Series]]:
     try:
         _set_objective_coefficient(rxn, 1)
         _model.slim_optimize()
-        # With an objective limit, the solver aborts once it reaches the clip.
-        if not (_stops_at_clip and _model.solver.status == ABORTED):
+        # With an objective limit, CPLEX stops once it reaches the clip.
+        if not (_stops_at_clip and _stopped_at_objective_limit(_model)):
             sutil.check_solver_status(_model.solver.status)
         fluxes = None
         if _loopless:
@@ -374,6 +383,7 @@ def _optimize_reactions(
                 pool.imap_unordered(_fva_step, reaction_ids, chunksize=chunk_size)
             )
     _init_worker(*initargs)
+    # Workers set the objective limit on their own copies of the model.
     try:
         return list(map(_fva_step, reaction_ids))
     finally:
@@ -510,9 +520,10 @@ def flux_variability_analysis(
         (default None).
     abs_flux_clip : float, optional
         Clip the reported fluxes to the interval from ``-abs_flux_clip`` to
-        ``abs_flux_clip``. This saves time when it only matters whether a
-        flux can reach this value, for instance to find blocked reactions
-        (default None).
+        ``abs_flux_clip``. When it only matters whether a flux can reach this
+        value, for instance to find blocked reactions, this saves time with
+        "fastSNP" and "potentials" and, if the solver is CPLEX, also without
+        loopless constraints (default None).
     processes : int, optional
         The number of parallel processes to run. If not explicitly passed,
         will be set from the global configuration singleton (default None).
