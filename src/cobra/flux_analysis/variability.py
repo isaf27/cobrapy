@@ -6,6 +6,7 @@ from warnings import warn
 
 import numpy as np
 import pandas as pd
+from optlang.interface import ABORTED
 from optlang.symbolics import Zero
 
 from ..core import Configuration, get_solution
@@ -80,6 +81,26 @@ def _init_abs_flux_clip_target(abs_flux_clip: Optional[float], sense: str) -> No
         _abs_flux_clip_constraint.ub = None
 
 
+def _set_objective_limit(model: "Model", sense: str, limit: Optional[float]) -> bool:
+    """Let the solver stop a linear program once the objective reaches a limit.
+
+    Only the primal simplex of CPLEX supports this. Without a limit, the
+    defaults of CPLEX are restored. Returns whether the solver uses the limit.
+    """
+    if sutil.interface_to_str(model.problem) != "cplex":
+        return False
+    limits = model.solver.problem.parameters.simplex.limits
+    limits.upperobj.reset()
+    limits.lowerobj.reset()
+    if limit is None:
+        return False
+    if sense == "max":
+        limits.upperobj.set(limit)
+    else:
+        limits.lowerobj.set(-limit)
+    return True
+
+
 def _init_worker(
     model: "Model",
     loopless: bool,
@@ -107,13 +128,24 @@ def _init_worker(
     global _loopless
     global _abs_flux_clip
     global _all_fluxes
+    global _stops_at_clip
     _model = model
     _model.solver.objective.direction = sense
     _loopless = loopless
     _abs_flux_clip = abs_flux_clip
     _all_fluxes = all_fluxes
 
-    _init_abs_flux_clip_target(None if loopless else abs_flux_clip, sense)
+    # The clip target bounds the objective of a MILP. It slows a linear
+    # program down, which is clipped after the optimization instead.
+    is_milp = _model.solver.is_integer
+    _init_abs_flux_clip_target(
+        abs_flux_clip if is_milp and not loopless else None, sense
+    )
+    # A stopped optimization has no optimal flux distribution to return.
+    stop_at_clip = abs_flux_clip is not None and not (is_milp or loopless or all_fluxes)
+    _stops_at_clip = _set_objective_limit(
+        _model, sense, abs_flux_clip if stop_at_clip else None
+    )
 
 
 def _set_objective_coefficient(rxn: "Reaction", coefficient: int) -> None:
@@ -157,6 +189,7 @@ def _fva_step(reaction_id: str) -> Tuple[str, float, Optional[pd.Series]]:
     global _loopless
     global _abs_flux_clip
     global _all_fluxes
+    global _stops_at_clip
 
     rxn = _model.reactions.get_by_id(reaction_id)
 
@@ -167,7 +200,9 @@ def _fva_step(reaction_id: str) -> Tuple[str, float, Optional[pd.Series]]:
     try:
         _set_objective_coefficient(rxn, 1)
         _model.slim_optimize()
-        sutil.check_solver_status(_model.solver.status)
+        # With an objective limit, the solver aborts once it reaches the clip.
+        if not (_stops_at_clip and _model.solver.status == ABORTED):
+            sutil.check_solver_status(_model.solver.status)
         fluxes = None
         if _loopless:
             if _all_fluxes:
@@ -339,7 +374,10 @@ def _optimize_reactions(
                 pool.imap_unordered(_fva_step, reaction_ids, chunksize=chunk_size)
             )
     _init_worker(*initargs)
-    return list(map(_fva_step, reaction_ids))
+    try:
+        return list(map(_fva_step, reaction_ids))
+    finally:
+        _set_objective_limit(model, sense, None)
 
 
 def _confirm_clipped_bounds(

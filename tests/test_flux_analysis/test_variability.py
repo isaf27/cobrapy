@@ -152,6 +152,18 @@ def test_flux_variability_abs_flux_clip(
     assert np.allclose(clipped_fva_out, expected)
 
 
+def test_flux_variability_abs_flux_clip_keeps_solver(
+    model: Model, all_solvers: List[str]
+) -> None:
+    """Clipped FVA leaves the solver able to optimize beyond the clip."""
+    model.solver = all_solvers
+    optimum = model.slim_optimize()
+    flux_variability_analysis(
+        model, fraction_of_optimum=None, abs_flux_clip=0.1, processes=1
+    )
+    assert model.slim_optimize() == pytest.approx(optimum)
+
+
 @pytest.mark.skipif("SKIP_MP" in os.environ, reason="unsafe for parallel execution")
 def test_parallel_flux_variability(
     model: Model, fva_results: pd.DataFrame, all_solvers: List[str]
